@@ -1,0 +1,45 @@
+# Gradle
+.gradle/
+build/
+**/build/
+
+# Local configuration
+local.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Personal/Internal docs (не для публикации)
+mike.md
+schema.md
+plan.md
+yggpeers_complete*.md
+
+# Debug logs
+adb_logcat/
+
+# Backups
+backups/
+
+# MCP tools
+.serena/
+
+# Secrets (на всякий случай)
+*.keystore
+*.jks
+.env
+secrets/
+credentials.json
+
+# OS generated
+Thumbs.db
+.DS_Store
+
+# Helper scripts (не для публикации)
+git_setup.sh
+git_check.sh
+git_publish.sh
+git_update.sh
+backup.sh

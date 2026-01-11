@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Ygg Peer Checker</string>
+
+    <!-- Main screen -->
+    <string name="title_peer_checker">Yggdrasil Peer Checker</string>
+    <string name="subtitle_description">Find and check available public peers</string>
+
+    <!-- Buttons -->
+    <string name="btn_find_peers">Find Peers</string>
+    <string name="btn_stop">Stop</string>
+    <string name="btn_copy_selected">Copy Selected</string>
+    <string name="btn_select_all">Select All</string>
+    <string name="btn_clear">Clear</string>
+
+    <!-- Progress -->
+    <string name="progress_checking">Checking peers: %1$d%%</string>
+    <string name="progress_found">Found: %1$d available</string>
+
+    <!-- Status -->
+    <string name="status_ready">Ready to search</string>
+    <string name="status_loading">Loading peer list...</string>
+    <string name="status_checking">Checking %1$d peers...</string>
+    <string name="status_complete">Complete: %1$d/%2$d available</string>
+    <string name="status_no_network">No network connection</string>
+
+    <!-- Peer item -->
+    <string name="peer_rtt_ms">%1$dms</string>
+</resources>
