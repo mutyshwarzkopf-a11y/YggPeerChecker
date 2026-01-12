@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -140,14 +141,14 @@ fun ViewTab(
                 Text("Fill DNS", fontSize = 11.sp)
             }
 
-            // Clear DNS - по активному фильтру (оранжевая кнопка)
-            val dnsHostsInFilter = filteredHosts.filter { it.dnsIp1 != null }
+            // Clear DNS & GeoIP - по активному фильтру (оранжевая кнопка)
+            val hostsWithDnsOrGeo = filteredHosts.filter { it.dnsIp1 != null || it.geoIp != null }
             OutlinedButton(
                 onClick = { 
-                    val ids = dnsHostsInFilter.map { it.id }
-                    viewModel.clearDnsByIds(ids)
+                    val ids = hostsWithDnsOrGeo.map { it.id }
+                    viewModel.clearDnsAndGeoIpByIds(ids)
                 },
-                enabled = !uiState.isLoading && dnsHostsInFilter.isNotEmpty(),
+                enabled = !uiState.isLoading && hostsWithDnsOrGeo.isNotEmpty(),
                 modifier = Modifier.height(32.dp),
                 contentPadding = PaddingValues(horizontal = 10.dp),
                 colors = ButtonDefaults.outlinedButtonColors(
@@ -160,7 +161,41 @@ fun ViewTab(
                     modifier = Modifier.size(14.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("Clear DNS (${dnsHostsInFilter.size})", fontSize = 11.sp)
+                Text("Clr (${hostsWithDnsOrGeo.size})", fontSize = 11.sp)
+            }
+
+            // Fill GeoIP
+            val geoIpHostsInFilter = filteredHosts.filter { 
+                it.geoIp == null && (it.dnsIp1 != null || 
+                    it.address.matches(Regex("^[0-9.:]+$")) || 
+                    it.address.startsWith("["))
+            }
+            OutlinedButton(
+                onClick = { 
+                    val ids = geoIpHostsInFilter.map { it.id }
+                    viewModel.fillGeoIp(ids)
+                },
+                enabled = !uiState.isLoading && geoIpHostsInFilter.isNotEmpty(),
+                modifier = Modifier.height(32.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.secondary
+                )
+            ) {
+                if (uiState.isLoading && uiState.statusMessage.contains("GeoIP")) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Public,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("GeoIP (${geoIpHostsInFilter.size})", fontSize = 11.sp)
             }
 
             // Clear Visible
@@ -279,34 +314,36 @@ private fun hasDnsResolved(host: Host): Boolean {
     return host.dnsIp1 != null
 }
 
-// Проверка на IPv6 адрес (чистый IP, не DNS имя)
+// Проверка на IPv6 адрес (включая резолвленные и ip6./ipv6. в имени)
 private fun isIpv6Host(host: Host): Boolean {
-    // Проверяем основной адрес - это IPv6 если содержит двоеточия
-    // но НЕ как часть URL схемы (://), и НЕ в квадратных скобках (это тоже IPv6 литерал)
-    val addr = host.address
-    
-    // IPv6 адрес без скобок (редко, но возможно)
+    val addr = host.address.lowercase()
+
+    // "ip6." или "ipv6." в имени хоста (например ip6.example.com)
+    if (addr.contains("ip6.") || addr.contains("ipv6.")) {
+        return true
+    }
+
+    // IPv6 адрес без скобок (содержит двоеточия, но не как часть URL схемы)
     if (addr.contains(":") && !addr.contains("://") && !addr.contains("[")) {
         return true
     }
-    
-    // IPv6 в квадратных скобках в hostString - это IP литерал, не DNS имя
+
+    // IPv6 в квадратных скобках в hostString - это IP литерал
     val bracketMatch = Regex("\\[([^\\]]+)\\]").find(host.hostString)
     if (bracketMatch != null) {
         val inBrackets = bracketMatch.groupValues[1]
-        // Если внутри скобок есть двоеточия - это IPv6 литерал
         if (inBrackets.contains(":")) {
             return true
         }
     }
-    
-    // Проверяем DNS IP на IPv6
+
+    // Резолвленные DNS IP - IPv6 (содержат двоеточия)
     if (host.dnsIp1?.contains(":") == true ||
         host.dnsIp2?.contains(":") == true ||
         host.dnsIp3?.contains(":") == true) {
         return true
     }
-    
+
     return false
 }
 
@@ -372,14 +409,27 @@ private fun HostItem(host: Host) {
                     }
                 )
 
-                // Индикатор DNS (визуальный значек резолва)
-                if (host.dnsIp1 != null) {
-                    Icon(
-                        imageVector = Icons.Default.Dns,
-                        contentDescription = "DNS resolved",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(16.dp)
-                    )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // GeoIP индикатор
+                    host.geoIp?.let { geo ->
+                        Text(
+                            text = geo,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.secondary
+                        )
+                    }
+                    // Индикатор DNS (визуальный значек резолва)
+                    if (host.dnsIp1 != null) {
+                        Icon(
+                            imageVector = Icons.Default.Dns,
+                            contentDescription = "DNS resolved",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                 }
             }
 
@@ -402,66 +452,54 @@ private fun HostItem(host: Host) {
                 overflow = TextOverflow.Ellipsis
             )
 
-            // DNS IP - 3 адреса с временем резолва
+            // DNS IP - дата резолва отдельной строкой, затем 3 адреса
             Column(
                 modifier = Modifier.padding(top = 4.dp)
             ) {
-                val dnsTimestamp = host.dnsTimestamp?.let { formatDate(it) } ?: ""
-                
-                // IP1
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "IP1: ${host.dnsIp1 ?: "---"}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (host.dnsIp1 != null) 
-                            MaterialTheme.colorScheme.onSurface 
-                        else 
-                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                        fontFamily = FontFamily.Monospace
-                    )
-                    if (host.dnsIp1 != null) {
+                // Дата резолва над всеми IP (если есть хоть один)
+                if (host.dnsIp1 != null || host.dnsIp2 != null || host.dnsIp3 != null) {
+                    host.dnsTimestamp?.let { ts ->
                         Text(
-                            text = dnsTimestamp,
+                            text = "Resolved: ${formatDate(ts)}",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+                            modifier = Modifier.padding(bottom = 2.dp)
                         )
                     }
                 }
-                
+
+                // IP1
+                Text(
+                    text = "IP1: ${host.dnsIp1 ?: "---"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (host.dnsIp1 != null)
+                        MaterialTheme.colorScheme.onSurface
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    fontFamily = FontFamily.Monospace
+                )
+
                 // IP2
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "IP2: ${host.dnsIp2 ?: "---"}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (host.dnsIp2 != null) 
-                            MaterialTheme.colorScheme.onSurface 
-                        else 
-                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-                
+                Text(
+                    text = "IP2: ${host.dnsIp2 ?: "---"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (host.dnsIp2 != null)
+                        MaterialTheme.colorScheme.onSurface
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    fontFamily = FontFamily.Monospace
+                )
+
                 // IP3
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "IP3: ${host.dnsIp3 ?: "---"}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (host.dnsIp3 != null) 
-                            MaterialTheme.colorScheme.onSurface 
-                        else 
-                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
+                Text(
+                    text = "IP3: ${host.dnsIp3 ?: "---"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (host.dnsIp3 != null)
+                        MaterialTheme.colorScheme.onSurface
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    fontFamily = FontFamily.Monospace
+                )
             }
 
             // Источник и дата добавления

@@ -97,4 +97,14 @@ interface HostDao {
 
     @Query("SELECT * FROM hosts WHERE hostType IN ('sni', 'http', 'https')")
     suspend fun getSniHosts(): List<Host>
+
+    // GeoIP методы
+    @Query("UPDATE hosts SET geoIp = :geoIp WHERE id = :hostId")
+    suspend fun updateGeoIp(hostId: String, geoIp: String)
+
+    @Query("UPDATE hosts SET geoIp = NULL WHERE id IN (:ids)")
+    suspend fun clearGeoIpByIds(ids: List<String>)
+
+    @Query("SELECT * FROM hosts WHERE geoIp IS NULL")
+    suspend fun getHostsWithoutGeoIp(): List<Host>
 }

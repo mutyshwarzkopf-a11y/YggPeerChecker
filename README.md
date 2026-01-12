@@ -1,86 +1,87 @@
 # YggPeerChecker
 
-Android application for checking and managing Yggdrasil Network peers and .
+Утилита для проверки доступности Yggdrasil-пиров и произвольных хостов.
 
-## Features
+**Это debug-версия pet-проекта, возможны баги и нестабильная работа.**
 
-### Checks Tab
-- **Multi-type peer checking**: ICMP Ping, Ygg RTT (TCP/TLS connect), Port Default, Port 80, Port 443
-- **DNS Fallback**: Automatically checks resolved DNS IPs if main address fails
-- **Always Check DNS IPs**: Option to always check fallback IPs regardless of main result
-- **Fast Mode**: Stop checking after first successful response
-- **Sort & Filter**: Sort by any check type, filter by response time (ms)
-- **Concurrent streams**: Configurable parallel connections (1-30)
+## Для чего это нужно
 
-### Lists Tab
+Сеть [Yggdrasil](https://yggdrasil-network.github.io/) использует публичные пиры для подключения. При настройке клиента (yggstack, Yggdrasil, и т.д.) важно выбрать рабочие пиры с хорошим временем отклика.
 
-#### Management
-- Load peers from public sources:
-  - neilalexander.dev (Yggdrasil peers)
-  - peers.yggdrasil.link (Yggdrasil peers)
-  - RU Whitelist (SNI/HTTP(S) hosts)
-- Load from clipboard
-- Clear all hosts
+**YggPeerChecker помогает:**
+- Загрузить списки публичных пиров из разных источников
+- Проверить доступность пиров (Ping, TCP/TLS connect, порты)
+- Отсортировать по времени отклика
+- Скопировать рабочие адреса для использования в конфиге
 
-#### View
-- Two-level filtering:
-  - Type: All / Ygg / SNI
-  - Address: All / DNS / NoDNS / IPv6 / IPv4 / IpOnly
-- Fill DNS: Resolve DNS names to IPs (with IDN support)
-- Clear DNS: Clear resolved IPs by current filter
-- Clear Visible: Remove hosts matching current filter
+Также можно проверять произвольные хосты и IP-адреса — полезно для тестирования доступности сайтов в условиях блокировок.
 
-### Config Tab
-- Concurrent streams slider (1-30)
-- Network interface check toggle
-- Theme selection (System / Light / Dark)
+## Возможности
 
-## Supported Protocols
+### Вкладка Checks (Проверки)
+- **5 типов проверок**: ICMP Ping, Ygg RTT (TCP/TLS connect), Port Default, Port 80, Port 443
+- **DNS Fallback**: автоматическая проверка резолвленных IP при недоступности основного адреса
+- **Always Check DNS IPs**: проверка всех IP (основной + резолвленные)
+- **Fast Mode**: остановка при первом успешном ответе
+- **Сортировка и фильтр**: по любому типу проверки, фильтр по времени (ms)
+- **Параллельность**: настраиваемое количество потоков (1-30)
 
-### Yggdrasil (Ygg)
-- tcp://
-- tls://
-- quic:// (detection only, no RTT check)
-- ws://
-- wss://
+### Вкладка Lists (Списки)
 
-### SNI/HTTP
-- sni://
-- http://
-- https://
+**Management** — загрузка списков:
+- neilalexander.dev (Yggdrasil пиры)
+- peers.yggdrasil.link (Yggdrasil пиры)
+- RU Whitelist (SNI хосты из whitelist)
+- Clipboard / File (свои списки)
 
-## Technical Details
+**View** — просмотр и фильтрация:
+- Фильтры по типу: All / Ygg / SNI
+- Фильтры по адресу: All / DNS / NoDNS / IPv6 / IPv4 / IpOnly
+- Fill DNS — массовый DNS резолвинг
+- Clear DNS / Clear Visible — очистка по фильтру
 
-- **Min SDK**: 23 (Android 6.0)
-- **Target SDK**: 34 (Android 14)
-- **Architecture**: arm64-v8a
-- **UI Framework**: Jetpack Compose with Material 3
-- **Database**: Room for local storage
-- **Concurrency**: Kotlin Coroutines with Semaphore
+### Вкладка System
+- Настройка параллельных потоков
+- Выбор темы (System / Light / Dark)
+- Просмотр логов
 
-## Building
+## Поддерживаемые протоколы
+
+**Yggdrasil пиры:**
+- `tcp://host:port`
+- `tls://host:port`
+- `quic://host:port`
+- `ws://host:port`
+- `wss://host:port`
+
+**Произвольные хосты** (для проверки доступности IP и доменов):
+- Просто `host` или `host:port`
+- `http://host` / `https://host`
+
+## Сборка
 
 ```bash
 ./gradlew assembleDebug
 ```
 
-APK output: `app/build/outputs/apk/debug/YggPeerChecker-X.X.X.apk`
+APK: `app/build/outputs/apk/debug/YggPeerChecker-X.X.X.apk`
 
-## Requirements
-
-- Android Studio or Gradle
+**Требования:**
 - JDK 17+
 - Android SDK 34
 
-## Credits
+## Полезные ссылки
 
-This project was generated with assistance from Claude AI (Anthropic).
+**Yggdrasil:**
+- [Yggdrasil Network](https://yggdrasil-network.github.io/) — официальный сайт
+- [Public Peers](https://github.com/yggdrasil-network/public-peers) — списки публичных пиров
+- [yggstack](https://github.com/nicholaspaulapps/yggstack) — Android-клиент Yggdrasil
+- [Yggmail](https://github.com/neilalexander/yggmail) — почта через Yggdrasil
+- [Tyr](https://github.com/nicholaspaulapps/tyr) — Android-браузер для Yggdrasil
 
-## Links
-
-- [Yggdrasil Network](https://yggdrasil-network.github.io/)
-- [Public Peers List](https://github.com/yggdrasil-network/public-peers)
-
-## License
+## Лицензия
 
 MIT License
+
+---
+*Pet-проект, сгенерирован с Claude AI*

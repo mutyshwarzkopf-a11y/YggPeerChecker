@@ -177,7 +177,7 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
                     style = MaterialTheme.typography.titleMedium
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("Version: 0.5.1")
+                Text("Version: 0.5.4")
 
                 Spacer(modifier = Modifier.height(8.dp))
 

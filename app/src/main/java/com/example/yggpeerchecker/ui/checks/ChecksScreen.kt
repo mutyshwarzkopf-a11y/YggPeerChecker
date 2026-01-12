@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Search
@@ -45,6 +46,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -306,77 +308,90 @@ fun ChecksScreen(
         // Sort/Filter Dialog
         if (showSortDialog) {
             var tempFilterMs by remember { mutableIntStateOf(uiState.filterMs) }
-            
+            var sortDropdownExpanded by remember { mutableStateOf(false) }
+
             AlertDialog(
                 onDismissRequest = { showSortDialog = false },
                 title = { Text("Sort & Filter") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        // Sort by - Dropdown меню
                         Text("Sort by:", style = MaterialTheme.typography.labelMedium)
-                        
-                        // Первая строка: Ping, YggRTT
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            listOf(CheckType.PING, CheckType.YGG_RTT).forEach { type ->
-                                FilterChip(
-                                    selected = uiState.sortType == type,
-                                    onClick = { viewModel.setSortType(type) },
-                                    label = { Text(type.displayName, fontSize = 11.sp) },
-                                    modifier = Modifier.weight(1f)
-                                )
+                        Box {
+                            OutlinedButton(
+                                onClick = { sortDropdownExpanded = true },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(uiState.sortType.displayName, modifier = Modifier.weight(1f))
+                                Icon(Icons.Default.ArrowDropDown, contentDescription = null)
                             }
-                        }
-                        
-                        // Вторая строка: Port Default, Port 80, Port 443
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            listOf(CheckType.PORT_DEFAULT, CheckType.PORT_80, CheckType.PORT_443).forEach { type ->
-                                FilterChip(
-                                    selected = uiState.sortType == type,
-                                    onClick = { viewModel.setSortType(type) },
-                                    label = { Text(type.displayName, fontSize = 10.sp) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-                        
-                        Text("Filter by ms (0 = off):", style = MaterialTheme.typography.labelMedium)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            OutlinedTextField(
-                                value = if (tempFilterMs > 0) tempFilterMs.toString() else "",
-                                onValueChange = { tempFilterMs = it.toIntOrNull() ?: 0 },
-                                modifier = Modifier.weight(1f),
-                                placeholder = { Text("0") },
-                                suffix = { Text("ms") },
-                                singleLine = true
-                            )
-                            // Быстрые кнопки
-                            listOf(100, 500, 1000).forEach { ms ->
-                                OutlinedButton(
-                                    onClick = { tempFilterMs = ms },
-                                    contentPadding = PaddingValues(horizontal = 8.dp),
-                                    modifier = Modifier.height(40.dp)
-                                ) {
-                                    Text("$ms", fontSize = 10.sp)
+                            DropdownMenu(
+                                expanded = sortDropdownExpanded,
+                                onDismissRequest = { sortDropdownExpanded = false }
+                            ) {
+                                CheckType.entries.forEach { type ->
+                                    DropdownMenuItem(
+                                        text = { Text(type.displayName) },
+                                        onClick = {
+                                            viewModel.setSortType(type)
+                                            sortDropdownExpanded = false
+                                        },
+                                        leadingIcon = if (uiState.sortType == type) {
+                                            { Icon(Icons.Default.Check, null, Modifier.size(18.dp)) }
+                                        } else null
+                                    )
                                 }
                             }
                         }
-                        
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        // Filter by ms - Slider
                         Text(
-                            "Shows only peers with ${uiState.sortType.displayName} < filter value",
+                            text = "Filter by ms: ${if (tempFilterMs == 0) "off" else "${tempFilterMs}ms"}",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                        Slider(
+                            value = tempFilterMs.toFloat(),
+                            onValueChange = { tempFilterMs = it.toInt() },
+                            valueRange = 0f..1000f,
+                            steps = 19,  // 50ms шаг (0, 50, 100, ... 1000)
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        // Быстрые кнопки
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(0 to "Off", 100 to "100", 300 to "300", 500 to "500", 1000 to "1s").forEach { (ms, label) ->
+                                OutlinedButton(
+                                    onClick = { tempFilterMs = ms },
+                                    contentPadding = PaddingValues(horizontal = 8.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(32.dp),
+                                    colors = if (tempFilterMs == ms)
+                                        ButtonDefaults.outlinedButtonColors(
+                                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                                        )
+                                    else ButtonDefaults.outlinedButtonColors()
+                                ) {
+                                    Text(label, fontSize = 10.sp)
+                                }
+                            }
+                        }
+
+                        Text(
+                            "Shows peers with ${uiState.sortType.displayName} ≤ filter value",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 },
                 confirmButton = {
-                    Button(onClick = { 
+                    Button(onClick = {
                         viewModel.setFilterMs(tempFilterMs)
-                        showSortDialog = false 
+                        showSortDialog = false
                     }) {
                         Text("Apply")
                     }

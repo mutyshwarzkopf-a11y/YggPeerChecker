@@ -420,4 +420,95 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
             throw e
         }
     }
+
+
+    // GeoIP резолвинг для хостов
+    // Возвращает Pair(resolved, skipped) где skipped = уже имеющие geoIp или нет IP
+    suspend fun fillGeoIp(
+        hostIds: List<String>? = null,
+        onProgress: (Int, Int) -> Unit
+    ): Result<Pair<Int, Int>> = withContext(Dispatchers.IO) {
+        try {
+            val allHosts = if (hostIds != null) {
+                hostIds.mapNotNull { hostDao.getHostById(it) }
+            } else {
+                hostDao.getAllHostsList()
+            }
+
+            // Хосты для резолва: есть IP (dnsIp1 или address если IP) И нет geoIp
+            val hostsToResolve = allHosts.filter { host ->
+                host.geoIp == null && (host.dnsIp1 != null || isIpAddress(host.address))
+            }
+            val skipped = allHosts.size - hostsToResolve.size
+            val total = hostsToResolve.size
+            var resolved = 0
+
+            logger.appendLogSync("INFO", "Starting GeoIP resolution for $total hosts (skipped: $skipped)")
+
+            hostsToResolve.forEachIndexed { index, host ->
+                onProgress(index + 1, total)
+
+                // Используем dnsIp1 если есть, иначе address
+                val ip = host.dnsIp1 ?: host.address
+
+                try {
+                    val geoInfo = resolveGeoIp(ip)
+                    if (geoInfo != null) {
+                        hostDao.updateGeoIp(host.id, geoInfo)
+                        resolved++
+                        logger.appendLogSync("DEBUG", "GeoIP for $ip: $geoInfo")
+                    }
+                } catch (e: Exception) {
+                    logger.appendLogSync("WARN", "GeoIP failed for $ip: ${e.message}")
+                }
+
+                // Небольшая задержка чтобы не перегружать API (ip-api.com rate limit)
+                kotlinx.coroutines.delay(100)
+            }
+
+            logger.appendLogSync("INFO", "GeoIP completed: $resolved/$total resolved, $skipped skipped")
+            Result.success(Pair(resolved, skipped))
+        } catch (e: Exception) {
+            logger.appendLogSync("ERROR", "GeoIP resolution failed: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    // Резолвинг GeoIP через ip-api.com
+    private suspend fun resolveGeoIp(ip: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val request = okhttp3.Request.Builder()
+                .url("http://ip-api.com/json/$ip?fields=countryCode,city")
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: return@withContext null
+                    // Парсим JSON: {"countryCode":"US","city":"Washington"}
+                    val ccMatch = Regex("\"countryCode\"\\s*:\\s*\"([^\"]+)\"").find(body)
+                    val cityMatch = Regex("\"city\"\\s*:\\s*\"([^\"]+)\"").find(body)
+
+                    val cc = ccMatch?.groupValues?.get(1) ?: return@withContext null
+                    val city = cityMatch?.groupValues?.get(1) ?: ""
+
+                    return@withContext if (city.isNotEmpty()) "$cc:$city" else cc
+                }
+            }
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // Очистка GeoIP по списку ID
+    suspend fun clearGeoIpByIds(ids: List<String>) = withContext(Dispatchers.IO) {
+        try {
+            if (ids.isEmpty()) return@withContext
+            hostDao.clearGeoIpByIds(ids)
+            logger.appendLogSync("INFO", "GeoIP cleared for ${ids.size} hosts")
+        } catch (e: Exception) {
+            logger.appendLogSync("ERROR", "Failed to clear GeoIP by IDs: ${e.message}")
+            throw e
+        }
+    }
 }

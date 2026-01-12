@@ -102,7 +102,7 @@ data class ChecksUiState(
     val selectedFallbacks: Set<String> = emptySet(),  // Выбранные fallback адреса
     val checkSource: String = "db",
     // Настройки проверок
-    val enabledCheckTypes: Set<CheckType> = setOf(CheckType.PING),
+    val enabledCheckTypes: Set<CheckType> = setOf(CheckType.PING, CheckType.YGG_RTT),
     val fastMode: Boolean = false,
     val alwaysCheckDnsIps: Boolean = true,  // Всегда проверять DNS IP (default: ON)
     val typeFilter: String = "All",
@@ -413,9 +413,7 @@ class ChecksViewModel(
         val shouldCheckDns = alwaysCheckDns || !mergedMain.available
 
         if (shouldCheckDns && dnsIps.isNotEmpty()) {
-            // Для DNS IP исключаем YGG_RTT - резолвленный IP это не Ygg пир
-            val dnsCheckTypes = typesToCheck - CheckType.YGG_RTT
-            
+            // Для DNS IP проверяем ВСЕ типы включая YGG_RTT - IP подставляется в URL
             for (dnsIp in dnsIps) {
                 if (shouldStop) break
 
@@ -424,7 +422,7 @@ class ChecksViewModel(
                     port = host.port,
                     hostType = host.hostType,
                     hostString = buildFallbackHostString(host.hostString, dnsIp),
-                    enabledTypes = dnsCheckTypes,
+                    enabledTypes = typesToCheck,
                     fastMode = fastMode,
                     isMainAddress = false
                 )

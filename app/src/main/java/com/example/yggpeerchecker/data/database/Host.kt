@@ -20,7 +20,8 @@ data class Host(
     val dnsIp1: String? = null,              // закэшированный первый IP из DNS
     val dnsIp2: String? = null,              // второй IP из DNS результата
     val dnsIp3: String? = null,              // третий IP из DNS результата
-    val dnsTimestamp: Long? = null           // когда был выполнен DNS резолв
+    val dnsTimestamp: Long? = null,          // когда был выполнен DNS резолв
+    val geoIp: String? = null                // GeoIP info: "CC:City" (например "US:Washington")
 ) {
     companion object {
         // Типы хостов для Ygg пиров

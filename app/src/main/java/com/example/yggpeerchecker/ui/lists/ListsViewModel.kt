@@ -285,6 +285,79 @@ class ListsViewModel(
             }
         }
     }
+
+
+    // GeoIP резолвинг для хостов
+    fun fillGeoIp(hostIds: List<String>? = null) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, lastError = null) }
+            val result = repository.fillGeoIp(hostIds) { current, total ->
+                _uiState.update { it.copy(statusMessage = "GeoIP resolving: $current/$total") }
+            }
+            result.fold(
+                onSuccess = { (resolved, skipped) ->
+                    val msg = if (skipped > 0) {
+                        "GeoIP: $resolved resolved (skipped: $skipped)"
+                    } else {
+                        "GeoIP: $resolved resolved"
+                    }
+                    _uiState.update { it.copy(
+                        isLoading = false,
+                        statusMessage = msg
+                    )}
+                },
+                onFailure = { error ->
+                    _uiState.update { it.copy(
+                        isLoading = false,
+                        statusMessage = "Error: ${error.message}",
+                        lastError = error.message
+                    )}
+                }
+            )
+        }
+    }
+
+    // Очистка GeoIP по списку ID (для фильтра)
+    fun clearGeoIpByIds(hostIds: List<String>) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, statusMessage = "Clearing GeoIP for ${hostIds.size} hosts...", lastError = null) }
+            try {
+                repository.clearGeoIpByIds(hostIds)
+                _uiState.update { it.copy(
+                    isLoading = false,
+                    statusMessage = "GeoIP cleared for ${hostIds.size} hosts"
+                )}
+            } catch (e: Exception) {
+                _uiState.update { it.copy(
+                    isLoading = false,
+                    statusMessage = "Error: ${e.message}",
+                    lastError = e.message
+                )}
+            }
+        }
+    }
+
+
+    // Очистка DNS и GeoIP по списку ID (комбинированная)
+    fun clearDnsAndGeoIpByIds(hostIds: List<String>) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, statusMessage = "Clearing DNS & GeoIP for ${hostIds.size} hosts...", lastError = null) }
+            try {
+                repository.clearDnsByIds(hostIds)
+                repository.clearGeoIpByIds(hostIds)
+                _uiState.update { it.copy(
+                    isLoading = false,
+                    statusMessage = "DNS & GeoIP cleared for ${hostIds.size} hosts"
+                )}
+            } catch (e: Exception) {
+                _uiState.update { it.copy(
+                    isLoading = false,
+                    statusMessage = "Error: ${e.message}",
+                    lastError = e.message
+                )}
+            }
+        }
+    }
 }
 
 class ListsViewModelFactory(
