@@ -2,10 +2,13 @@ package com.example.yggpeerchecker.ui.lists
 
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -24,6 +27,8 @@ import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.VpnKey
+import com.example.yggpeerchecker.data.repository.HostRepository
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -47,6 +52,17 @@ import androidx.compose.ui.unit.dp
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
+// Вспомогательная функция для открытия URL в браузере
+private fun openUrl(context: Context, url: String) {
+    try {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        Toast.makeText(context, "Cannot open URL", Toast.LENGTH_SHORT).show()
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ManagementTab(
     modifier: Modifier = Modifier,
@@ -134,14 +150,19 @@ fun ManagementTab(
 
         // Загрузка Ygg peers
         Text(
-            text = "Ygg Peers",
+            text = "Ygg Peers (long press → open URL)",
             style = MaterialTheme.typography.titleSmall,
             modifier = Modifier.padding(top = 8.dp)
         )
 
         Button(
             onClick = { viewModel.loadYggNeilalexander() },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = { viewModel.loadYggNeilalexander() },
+                    onLongClick = { openUrl(context, HostRepository.SOURCE_NEILALEXANDER.substringBeforeLast("/")) }
+                ),
             enabled = !uiState.isLoading
         ) {
             Icon(Icons.Default.Download, contentDescription = null)
@@ -151,7 +172,12 @@ fun ManagementTab(
 
         Button(
             onClick = { viewModel.loadYggLink() },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = { viewModel.loadYggLink() },
+                    onLongClick = { openUrl(context, HostRepository.SOURCE_YGGDRASIL_LINK.substringBeforeLast("/")) }
+                ),
             enabled = !uiState.isLoading
         ) {
             Icon(Icons.Default.Download, contentDescription = null)
@@ -159,21 +185,79 @@ fun ManagementTab(
             Text("Load (yggdrasil.link)")
         }
 
+        // Загрузка vless
+        Text(
+            text = "Vless/Vmess Proxies",
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+
+        Button(
+            onClick = { viewModel.loadVlessList() },
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = { viewModel.loadVlessList() },
+                    onLongClick = { openUrl(context, HostRepository.SOURCE_VLESS_SUB.substringBeforeLast("/")) }
+                ),
+            enabled = !uiState.isLoading
+        ) {
+            Icon(Icons.Default.VpnKey, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Load Vless List")
+        }
+
         // Загрузка whitelist
         Text(
-            text = "Whitelists",
+            text = "Whitelists / Blocklists",
             style = MaterialTheme.typography.titleSmall,
             modifier = Modifier.padding(top = 8.dp)
         )
 
         Button(
             onClick = { viewModel.loadWhitelist() },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = { viewModel.loadWhitelist() },
+                    onLongClick = { openUrl(context, HostRepository.SOURCE_RU_WHITELIST.substringBeforeLast("/")) }
+                ),
             enabled = !uiState.isLoading
         ) {
             Icon(Icons.Default.Security, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
-            Text("Load RU Whitelists")
+            Text("Load RU Whitelist")
+        }
+
+        // Mini White / Mini Black в одну строку
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = { viewModel.loadMiniWhite() },
+                modifier = Modifier
+                    .weight(1f)
+                    .combinedClickable(
+                        onClick = { viewModel.loadMiniWhite() },
+                        onLongClick = { openUrl(context, HostRepository.SOURCE_MINI_WHITE.substringBeforeLast("/")) }
+                    ),
+                enabled = !uiState.isLoading
+            ) {
+                Text("Mini White")
+            }
+            OutlinedButton(
+                onClick = { viewModel.loadMiniBlack() },
+                modifier = Modifier
+                    .weight(1f)
+                    .combinedClickable(
+                        onClick = { viewModel.loadMiniBlack() },
+                        onLongClick = { openUrl(context, HostRepository.SOURCE_MINI_BLACK.substringBeforeLast("/")) }
+                    ),
+                enabled = !uiState.isLoading
+            ) {
+                Text("Mini Black")
+            }
         }
 
         // Загрузка из файла/буфера

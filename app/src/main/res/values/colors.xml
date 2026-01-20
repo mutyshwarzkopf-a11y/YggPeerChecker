@@ -10,4 +10,10 @@
 
     <color name="online_green">#4CAF50</color>
     <color name="offline_red">#F44336</color>
+
+    <!-- Yggdrasil theme colors -->
+    <color name="ygg_green_light">#8BC34A</color>
+    <color name="ygg_green_medium">#4CAF50</color>
+    <color name="ygg_green_dark">#2E7D32</color>
+    <color name="ygg_green_accent">#76FF03</color>
 </resources>

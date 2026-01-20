@@ -31,8 +31,12 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
         // Источники Ygg пиров
         const val SOURCE_NEILALEXANDER = "https://publicpeers.neilalexander.dev/publicnodes.json"
         const val SOURCE_YGGDRASIL_LINK = "https://peers.yggdrasil.link/publicnodes.json"
-        // Источник whitelist
+        // Источники whitelist
         const val SOURCE_RU_WHITELIST = "https://github.com/hxehex/russia-mobile-internet-whitelist/raw/refs/heads/main/whitelist.txt"
+        const val SOURCE_MINI_WHITE = "https://raw.githubusercontent.com/mutyshwarzkopf-a11y/YggPeerChecker/main/miniwhite.txt"
+        const val SOURCE_MINI_BLACK = "https://raw.githubusercontent.com/mutyshwarzkopf-a11y/YggPeerChecker/main/miniblack.txt"
+        // Источники vless
+        const val SOURCE_VLESS_SUB = "https://raw.githubusercontent.com/yebekhe/TVC/main/subscriptions/xray/normal/vless"
     }
 
     // Flow для наблюдения за списком хостов
@@ -220,6 +224,29 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
             return parseYggPeerUrl(line, source, timestamp)
         }
 
+        // Проверка vless:// формата (vless://UUID@host:port?params#name)
+        val vlessRegex = Regex("^vless://[^@]+@([^:/?#]+):(\\d+)")
+        val vlessMatch = vlessRegex.find(line)
+        if (vlessMatch != null) {
+            val address = vlessMatch.groupValues[1]
+            val port = vlessMatch.groupValues[2].toIntOrNull() ?: 443
+            return Host(
+                id = id,
+                source = source,
+                dateAdded = timestamp,
+                hostType = "vless",
+                hostString = line,
+                address = address,
+                port = port,
+                dnsIp1 = null
+            )
+        }
+
+        // Проверка vmess:// (base64 encoded JSON)
+        if (line.startsWith("vmess://")) {
+            return parseVmessUrl(line, source, timestamp, id)
+        }
+
         // Проверка http(s):// формата
         val httpRegex = Regex("^(https?)://([^/:]+)(?::(\\d+))?(/.*)?$")
         val httpMatch = httpRegex.find(line)
@@ -366,6 +393,121 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
         return checkResultDao.getLatestResultForHost(hostId)
     }
 
+    // Парсинг vmess:// URL (base64 encoded JSON)
+    private fun parseVmessUrl(line: String, source: String, timestamp: Long, id: String): Host? {
+        return try {
+            val base64Part = line.removePrefix("vmess://")
+            val decoded = android.util.Base64.decode(base64Part, android.util.Base64.DEFAULT)
+            val json = JSONObject(String(decoded))
+            val address = json.optString("add", "").ifEmpty { json.optString("host", "") }
+            val port = json.optInt("port", 443)
+            if (address.isEmpty()) return null
+            Host(
+                id = id,
+                source = source,
+                dateAdded = timestamp,
+                hostType = "vmess",
+                hostString = line,
+                address = address,
+                port = port,
+                dnsIp1 = null
+            )
+        } catch (e: Exception) {
+            logger.appendLogSync("WARN", "Failed to parse vmess: ${e.message}")
+            null
+        }
+    }
+
+    // Загрузка vless/vmess списка
+    suspend fun loadVlessList(sourceUrl: String, onProgress: (String) -> Unit): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            onProgress("Loading vless list...")
+            logger.appendLogSync("INFO", "Loading vless from: $sourceUrl")
+
+            val request = Request.Builder().url(sourceUrl).build()
+            val response = httpClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                val error = "HTTP ${response.code}: ${response.message}"
+                logger.appendLogSync("ERROR", "Failed to load vless: $error")
+                return@withContext Result.failure(Exception(error))
+            }
+
+            val body = response.body?.string() ?: ""
+            val hosts = parseHostLines(body, sourceUrl)
+            hostDao.insertAll(hosts)
+            logger.appendLogSync("INFO", "Loaded ${hosts.size} hosts from vless list")
+            Result.success(hosts.size)
+        } catch (e: Exception) {
+            logger.appendLogSync("ERROR", "Failed to load vless: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    // Загрузка mini списков (google/hosts format)
+    suspend fun loadMiniList(sourceUrl: String, listName: String, onProgress: (String) -> Unit): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            onProgress("Loading $listName...")
+            logger.appendLogSync("INFO", "Loading mini list from: $sourceUrl")
+
+            val request = Request.Builder().url(sourceUrl).build()
+            val response = httpClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                val error = "HTTP ${response.code}: ${response.message}"
+                logger.appendLogSync("ERROR", "Failed to load $listName: $error")
+                return@withContext Result.failure(Exception(error))
+            }
+
+            val body = response.body?.string() ?: ""
+            val hosts = parseMiniHostLines(body, sourceUrl)
+            hostDao.insertAll(hosts)
+            logger.appendLogSync("INFO", "Loaded ${hosts.size} hosts from $listName")
+            Result.success(hosts.size)
+        } catch (e: Exception) {
+            logger.appendLogSync("ERROR", "Failed to load $listName: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    // Парсинг hosts-формата (0.0.0.0 domain или просто domain)
+    private fun parseMiniHostLines(text: String, source: String): List<Host> {
+        val hosts = mutableListOf<Host>()
+        val now = System.currentTimeMillis()
+
+        text.lines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("//") }
+            .forEach { line ->
+                try {
+                    // Формат: "0.0.0.0 domain" или "127.0.0.1 domain" или просто "domain"
+                    val parts = line.split(Regex("\\s+"))
+                    val domain = when {
+                        parts.size >= 2 && (parts[0] == "0.0.0.0" || parts[0] == "127.0.0.1") -> parts[1]
+                        parts.size == 1 && !parts[0].contains(".") -> return@forEach // skip
+                        parts.size == 1 -> parts[0]
+                        else -> return@forEach
+                    }
+                    // Пропускаем localhost и подобные
+                    if (domain == "localhost" || domain.endsWith(".local")) return@forEach
+
+                    val id = generateHostId(domain)
+                    hosts.add(Host(
+                        id = id,
+                        source = source,
+                        dateAdded = now,
+                        hostType = "sni",
+                        hostString = domain,
+                        address = domain,
+                        port = 443,
+                        dnsIp1 = null
+                    ))
+                } catch (e: Exception) {
+                    // Пропускаем невалидные строки
+                }
+            }
+
+        return hosts
+    }
+
     // Генерация ID хоста
     private fun generateHostId(input: String): String {
         val bytes = MessageDigest.getInstance("MD5").digest(input.toByteArray())
@@ -477,25 +619,45 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
     // Резолвинг GeoIP через ip-api.com
     private suspend fun resolveGeoIp(ip: String): String? = withContext(Dispatchers.IO) {
         try {
+            logger.appendLogSync("DEBUG", "GeoIP request for: $ip")
             val request = okhttp3.Request.Builder()
-                .url("http://ip-api.com/json/$ip?fields=countryCode,city")
+                .url("http://ip-api.com/json/$ip?fields=countryCode,city,status,message")
                 .build()
 
             httpClient.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    val body = response.body?.string() ?: return@withContext null
+                val body = response.body?.string()
+                logger.appendLogSync("DEBUG", "GeoIP response for $ip: code=${response.code}, body=$body")
+
+                if (response.isSuccessful && body != null) {
+                    // Проверяем статус API
+                    if (body.contains("\"status\":\"fail\"")) {
+                        val msgMatch = Regex("\"message\"\\s*:\\s*\"([^\"]+)\"").find(body)
+                        logger.appendLogSync("WARN", "GeoIP API fail for $ip: ${msgMatch?.groupValues?.get(1)}")
+                        return@withContext null
+                    }
+
                     // Парсим JSON: {"countryCode":"US","city":"Washington"}
                     val ccMatch = Regex("\"countryCode\"\\s*:\\s*\"([^\"]+)\"").find(body)
                     val cityMatch = Regex("\"city\"\\s*:\\s*\"([^\"]+)\"").find(body)
 
-                    val cc = ccMatch?.groupValues?.get(1) ?: return@withContext null
+                    val cc = ccMatch?.groupValues?.get(1)
                     val city = cityMatch?.groupValues?.get(1) ?: ""
 
-                    return@withContext if (city.isNotEmpty()) "$cc:$city" else cc
+                    if (cc == null) {
+                        logger.appendLogSync("WARN", "GeoIP no countryCode for $ip")
+                        return@withContext null
+                    }
+
+                    val result = if (city.isNotEmpty()) "$cc:$city" else cc
+                    logger.appendLogSync("DEBUG", "GeoIP parsed for $ip: $result")
+                    return@withContext result
+                } else {
+                    logger.appendLogSync("WARN", "GeoIP HTTP error for $ip: ${response.code}")
                 }
             }
             null
         } catch (e: Exception) {
+            logger.appendLogSync("ERROR", "GeoIP exception for $ip: ${e.message}")
             null
         }
     }

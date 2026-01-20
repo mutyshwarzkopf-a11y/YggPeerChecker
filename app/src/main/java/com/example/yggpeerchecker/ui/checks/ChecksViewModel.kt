@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.yggpeerchecker.data.DiscoveredPeer
+import com.example.yggpeerchecker.data.SessionManager
 import com.example.yggpeerchecker.data.database.AppDatabase
 import com.example.yggpeerchecker.data.database.Host
 import com.example.yggpeerchecker.utils.NetworkUtil
@@ -129,6 +130,7 @@ class ChecksViewModel(
     private var shouldStop = false
     private var discoveryJob: Job? = null
     private val database = AppDatabase.getDatabase(context)
+    private val sessionManager = SessionManager(context)
 
     private fun getConcurrentStreams(): Int {
         val prefs = context.getSharedPreferences("ygg_prefs", Context.MODE_PRIVATE)
@@ -308,7 +310,7 @@ class ChecksViewModel(
         }
     }
 
-    private fun startDbDiscovery(hosts: List<Host>, skipped: Int = 0) {
+    private fun startDbDiscovery(hosts: List<Host>, initialSkipped: Int = 0) {
         shouldStop = false
 
         discoveryJob = viewModelScope.launch {
@@ -322,22 +324,22 @@ class ChecksViewModel(
             }
 
             val concurrentStreams = getConcurrentStreams()
-            logger.appendLogSync("INFO", "Starting discovery: ${hosts.size} hosts, $concurrentStreams streams, $skipped skipped")
+            logger.appendLogSync("INFO", "Starting discovery: ${hosts.size} hosts, $concurrentStreams streams")
             logger.appendLogSync("INFO", "Check types: ${_uiState.value.enabledCheckTypes}")
             logger.appendLogSync("INFO", "Fast mode: ${_uiState.value.fastMode}")
 
-            val skippedInfo = if (skipped > 0) " | Skipped: $skipped" else ""
             _uiState.update { it.copy(
                 isSearching = true,
                 progress = 0,
                 totalPeers = hosts.size,
                 checkedCount = 0,
-                skippedCount = skipped,
-                statusMessage = "Checking ${hosts.size} hosts...$skippedInfo"
+                skippedCount = 0,  // Начинаем с 0, накапливаем по ходу
+                statusMessage = "Checking ${hosts.size} hosts..."
             )}
 
             val semaphore = Semaphore(concurrentStreams)
             val checkedCounter = AtomicInteger(0)
+            val skippedCounter = AtomicInteger(0)
 
             val jobs = hosts.map { host ->
                 launch(Dispatchers.IO) {
@@ -349,12 +351,13 @@ class ChecksViewModel(
                         logger.appendLogSync("DEBUG", "Checking: ${host.address} (stream ${Thread.currentThread().name})")
 
                         val existingResult = _uiState.value.hostResults[host.hostString]?.firstOrNull { it.isMainAddress }
-                        val results = checkHostWithFallback(host, existingResult)
+                        val (results, skippedChecks) = checkHostWithFallback(host, existingResult)
                         val checked = checkedCounter.incrementAndGet()
+                        val totalSkipped = skippedCounter.addAndGet(skippedChecks)
 
                         withContext(Dispatchers.Main) {
                             if (!shouldStop) {
-                                addCheckResult(host, results, checked, hosts.size)
+                                addCheckResult(host, results, checked, hosts.size, totalSkipped)
                             }
                         }
                     }
@@ -364,40 +367,50 @@ class ChecksViewModel(
             jobs.forEach { it.join() }
 
             _uiState.update { state ->
-                val skippedInfo = if (state.skippedCount > 0) " | Skipped: ${state.skippedCount}" else ""
+                val skipInfo = if (state.skippedCount > 0) " | Skip: ${state.skippedCount}" else ""
                 state.copy(
                     isSearching = false,
-                    statusMessage = "Done | OK: ${state.availableCount} | Fail: ${state.unavailableCount}$skippedInfo"
+                    statusMessage = "Done | OK: ${state.availableCount} | Fail: ${state.unavailableCount}$skipInfo"
                 )
             }
-            logger.appendLogSync("INFO", "Discovery completed")
+            logger.appendLogSync("INFO", "Discovery completed. Skipped: ${skippedCounter.get()} checks")
         }
     }
 
     // Проверка с учетом предыдущих результатов и fallback
-    private suspend fun checkHostWithFallback(host: Host, existingResult: HostCheckResult?): List<HostCheckResult> {
+    // Возвращает пару: список результатов и количество пропущенных проверок
+    private suspend fun checkHostWithFallback(host: Host, existingResult: HostCheckResult?): Pair<List<HostCheckResult>, Int> {
         val results = mutableListOf<HostCheckResult>()
         val enabledTypes = _uiState.value.enabledCheckTypes
         val fastMode = _uiState.value.fastMode
         val alwaysCheckDns = _uiState.value.alwaysCheckDnsIps
+        var skippedChecks = 0
 
-        // Определяем какие проверки нужны
+        // Определяем какие проверки нужны для основного адреса
         val typesToCheck = if (existingResult != null) {
             enabledTypes.filter { existingResult.needsCheck(it) }.toSet()
         } else {
             enabledTypes
         }
 
+        // Считаем пропущенные проверки для основного адреса
+        skippedChecks += enabledTypes.size - typesToCheck.size
+
         // Основной адрес
-        val mainResult = checkSingleTarget(
-            target = host.address,
-            port = host.port,
-            hostType = host.hostType,
-            hostString = host.hostString,
-            enabledTypes = typesToCheck,
-            fastMode = fastMode,
-            isMainAddress = true
-        )
+        val mainResult = if (typesToCheck.isNotEmpty()) {
+            checkSingleTarget(
+                target = host.address,
+                port = host.port,
+                hostType = host.hostType,
+                hostString = host.hostString,
+                enabledTypes = typesToCheck,
+                fastMode = fastMode,
+                isMainAddress = true
+            )
+        } else {
+            // Все проверки уже успешны - возвращаем существующий результат
+            existingResult!!
+        }
 
         // Объединяем с предыдущими результатами
         val mergedMain = existingResult?.merge(mainResult) ?: mainResult
@@ -413,27 +426,54 @@ class ChecksViewModel(
         val shouldCheckDns = alwaysCheckDns || !mergedMain.available
 
         if (shouldCheckDns && dnsIps.isNotEmpty()) {
-            // Для DNS IP проверяем ВСЕ типы включая YGG_RTT - IP подставляется в URL
+            val existingFallbacks = _uiState.value.hostResults[host.hostString]
+                ?.filter { !it.isMainAddress }
+                ?.associateBy { it.target }
+                ?: emptyMap()
+
             for (dnsIp in dnsIps) {
                 if (shouldStop) break
 
+                // Проверяем существующий результат для этого DNS IP
+                val existingDnsResult = existingFallbacks[dnsIp]
+                val dnsTypesToCheck = if (existingDnsResult != null) {
+                    enabledTypes.filter { existingDnsResult.needsCheck(it) }.toSet()
+                } else {
+                    enabledTypes
+                }
+
+                // Считаем пропущенные проверки для этого DNS IP
+                skippedChecks += enabledTypes.size - dnsTypesToCheck.size
+
+                // Пропускаем если все проверки уже успешны
+                if (dnsTypesToCheck.isEmpty()) {
+                    existingDnsResult?.let { results.add(it) }
+                    continue
+                }
+
+                // Подставляем IP в полный адрес для отображения
+                val fallbackHostString = buildFallbackHostString(host.hostString, dnsIp)
                 val dnsResult = checkSingleTarget(
                     target = dnsIp,
                     port = host.port,
                     hostType = host.hostType,
-                    hostString = buildFallbackHostString(host.hostString, dnsIp),
-                    enabledTypes = typesToCheck,
+                    hostString = fallbackHostString,
+                    enabledTypes = dnsTypesToCheck,
                     fastMode = fastMode,
-                    isMainAddress = false
+                    isMainAddress = false,
+                    displayAddress = fallbackHostString
                 )
-                results.add(dnsResult)
+
+                // Объединяем с существующими результатами
+                val mergedDnsResult = existingDnsResult?.merge(dnsResult) ?: dnsResult
+                results.add(mergedDnsResult)
 
                 // В fastMode останавливаемся при первом успехе (только если не alwaysCheckDns)
-                if (fastMode && !alwaysCheckDns && dnsResult.available) break
+                if (fastMode && !alwaysCheckDns && mergedDnsResult.available) break
             }
         }
 
-        return results
+        return Pair(results, skippedChecks)
     }
 
     private fun buildFallbackHostString(originalHostString: String, ip: String): String {
@@ -459,8 +499,10 @@ class ChecksViewModel(
         hostString: String,
         enabledTypes: Set<CheckType>,
         fastMode: Boolean,
-        isMainAddress: Boolean
+        isMainAddress: Boolean,
+        displayAddress: String? = null  // Адрес для отображения (для DNS fallback - полный URL)
     ): HostCheckResult {
+        val resultTarget = displayAddress ?: target  // Что показывать в UI
         var pingTime: Long = -1
         var yggRtt: Long = -1
         var portDefault: Long = -1
@@ -478,7 +520,10 @@ class ChecksViewModel(
                     pingTime = ping.toLong()
                     available = true
                     logger.appendLogSync("DEBUG", "Ping OK: $target = ${pingTime}ms")
-                    if (fastMode) return HostCheckResult(target, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                } else {
+                    pingTime = -2  // Failed
+                    logger.appendLogSync("DEBUG", "Ping FAILED: $target")
                 }
             }
 
@@ -490,8 +535,14 @@ class ChecksViewModel(
                     yggRtt = rtt
                     available = true
                     logger.appendLogSync("DEBUG", "Ygg RTT OK: $hostString = ${yggRtt}ms")
-                    if (fastMode) return HostCheckResult(target, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                } else {
+                    yggRtt = -2  // Failed
+                    logger.appendLogSync("DEBUG", "Ygg RTT FAILED: $hostString")
                 }
+            } else if (enabledTypes.contains(CheckType.YGG_RTT) && !Host.isYggType(hostType)) {
+                // Для не-Ygg типов YGG_RTT не применим - оставляем -1 (off/n/a)
+                logger.appendLogSync("DEBUG", "Ygg RTT N/A for SNI type: $hostString")
             }
 
             // Port default
@@ -502,7 +553,10 @@ class ChecksViewModel(
                     portDefault = result.responseTime
                     available = true
                     logger.appendLogSync("DEBUG", "Port $port OK: $target = ${portDefault}ms")
-                    if (fastMode) return HostCheckResult(target, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                } else {
+                    portDefault = -2  // Failed
+                    logger.appendLogSync("DEBUG", "Port $port FAILED: $target")
                 }
             }
 
@@ -514,7 +568,10 @@ class ChecksViewModel(
                     port80 = result.responseTime
                     available = true
                     logger.appendLogSync("DEBUG", "Port 80 OK: $target = ${port80}ms")
-                    if (fastMode) return HostCheckResult(target, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                } else {
+                    port80 = -2  // Failed
+                    logger.appendLogSync("DEBUG", "Port 80 FAILED: $target")
                 }
             }
 
@@ -526,7 +583,10 @@ class ChecksViewModel(
                     port443 = result.responseTime
                     available = true
                     logger.appendLogSync("DEBUG", "Port 443 OK: $target = ${port443}ms")
-                    if (fastMode) return HostCheckResult(target, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                } else {
+                    port443 = -2  // Failed
+                    logger.appendLogSync("DEBUG", "Port 443 FAILED: $target")
                 }
             }
 
@@ -537,7 +597,7 @@ class ChecksViewModel(
 
         if (!available) error = "All checks failed"
 
-        return HostCheckResult(target, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, available, error)
+        return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, available, error)
     }
 
     // Ygg RTT через прямой TCP/TLS connect
@@ -563,7 +623,7 @@ class ChecksViewModel(
         }
     }
 
-    private fun addCheckResult(host: Host, results: List<HostCheckResult>, current: Int, total: Int) {
+    private fun addCheckResult(host: Host, results: List<HostCheckResult>, current: Int, total: Int, skipped: Int = 0) {
         val mainResult = results.firstOrNull { it.isMainAddress } ?: return
         val bestResult = results.firstOrNull { it.available } ?: mainResult
         val enabledTypes = _uiState.value.enabledCheckTypes
@@ -579,6 +639,7 @@ class ChecksViewModel(
             address = host.hostString,
             protocol = host.hostType,
             region = host.region ?: extractRegion(host.source),
+            geoIp = host.geoIp ?: "",
             rtt = when {
                 bestResult.yggRtt >= 0 -> bestResult.yggRtt
                 bestResult.portDefault >= 0 -> bestResult.portDefault
@@ -622,13 +683,15 @@ class ChecksViewModel(
             val updatedHostResults = state.hostResults.toMutableMap()
             updatedHostResults[host.hostString] = results
 
+            val skipInfo = if (skipped > 0) " | Skip: $skipped" else ""
             state.copy(
                 peers = sortedPeers,
                 progress = progress,
                 checkedCount = current,
+                skippedCount = skipped,  // Обновляем skippedCount
                 availableCount = sortedPeers.count { it.available },
                 unavailableCount = sortedPeers.count { !it.available },
-                statusMessage = "Checking: $current/$total | Available: ${sortedPeers.count { it.available }}",
+                statusMessage = "Checking: $current/$total | OK: ${sortedPeers.count { it.available }}$skipInfo",
                 hostResults = updatedHostResults
             )
         }
@@ -643,7 +706,8 @@ class ChecksViewModel(
             state.copy(
                 isSearching = false,
                 progress = 0,
-                statusMessage = "Stopped | Available: ${state.availableCount} | Unavailable: ${state.unavailableCount}"
+                statusMessage = "Stopped | OK: ${state.availableCount} | Fail: ${state.unavailableCount}" +
+                    if (state.skippedCount > 0) " | Skip: ${state.skippedCount}" else ""
             )
         }
     }
@@ -717,6 +781,76 @@ class ChecksViewModel(
     fun getHostFallbackResults(hostAddress: String): List<HostCheckResult> {
         return _uiState.value.hostResults[hostAddress]?.filter { !it.isMainAddress } ?: emptyList()
     }
+
+    // Получение списка сохраненных сессий
+    suspend fun getSessions(): List<SessionManager.SavedSession> {
+        return sessionManager.getSessions()
+    }
+
+    // Сохранение текущей сессии
+    fun saveSession(name: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = sessionManager.saveSession(
+                name = name,
+                peers = _uiState.value.peers,
+                hostResults = _uiState.value.hostResults
+            )
+            result.fold(
+                onSuccess = { fileName ->
+                    logger.appendLogSync("INFO", "Session saved: $fileName")
+                    withContext(Dispatchers.Main) {
+                        _uiState.update { it.copy(statusMessage = "Session saved: $name") }
+                    }
+                },
+                onFailure = { error ->
+                    logger.appendLogSync("ERROR", "Failed to save session: ${error.message}")
+                    withContext(Dispatchers.Main) {
+                        _uiState.update { it.copy(statusMessage = "Error: ${error.message}") }
+                    }
+                }
+            )
+        }
+    }
+
+    // Загрузка сессии
+    fun loadSession(fileName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = sessionManager.loadSession(fileName)
+            result.fold(
+                onSuccess = { (peers, hostResults) ->
+                    logger.appendLogSync("INFO", "Session loaded: ${peers.size} peers")
+                    withContext(Dispatchers.Main) {
+                        _uiState.update { state ->
+                            state.copy(
+                                peers = peers,
+                                hostResults = hostResults,
+                                availableCount = peers.count { it.isAlive() },
+                                unavailableCount = peers.count { !it.isAlive() },
+                                statusMessage = "Loaded ${peers.size} peers"
+                            )
+                        }
+                    }
+                },
+                onFailure = { error ->
+                    logger.appendLogSync("ERROR", "Failed to load session: ${error.message}")
+                    withContext(Dispatchers.Main) {
+                        _uiState.update { it.copy(statusMessage = "Error: ${error.message}") }
+                    }
+                }
+            )
+        }
+    }
+
+    // Удаление сессии
+    fun deleteSession(fileName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            sessionManager.deleteSession(fileName)
+            logger.appendLogSync("INFO", "Session deleted: $fileName")
+        }
+    }
+
+    // Генерация имени сессии по умолчанию
+    fun generateSessionName(): String = sessionManager.generateDefaultName()
 
     override fun onCleared() {
         super.onCleared()

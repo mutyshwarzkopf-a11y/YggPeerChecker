@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -50,11 +51,13 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,8 +69,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.yggpeerchecker.data.DiscoveredPeer
+import com.example.yggpeerchecker.data.SessionManager
 import com.example.yggpeerchecker.ui.theme.OnlineGreen
 import com.example.yggpeerchecker.utils.PersistentLogger
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -84,6 +89,8 @@ fun ChecksScreen(
     val uiState by viewModel.uiState.collectAsState()
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
+    var showSessionsDialog by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     // Применяем фильтры и сортировки к списку результатов
     val filteredPeers = remember(uiState.peers, uiState.typeFilter, uiState.sortType, uiState.filterMs) {
@@ -224,6 +231,14 @@ fun ChecksScreen(
                 modifier = Modifier.size(50.dp)
             ) {
                 Icon(Icons.Default.FilterList, contentDescription = "Sort/Filter", modifier = Modifier.size(24.dp))
+            }
+
+            // Sessions icon
+            IconButton(
+                onClick = { showSessionsDialog = true },
+                modifier = Modifier.size(50.dp)
+            ) {
+                Icon(Icons.Default.Save, contentDescription = "Sessions", modifier = Modifier.size(24.dp))
             }
         }
 
@@ -404,6 +419,124 @@ fun ChecksScreen(
             )
         }
 
+        // Sessions Dialog
+        if (showSessionsDialog) {
+            var sessions by remember { mutableStateOf<List<SessionManager.SavedSession>>(emptyList()) }
+            var showSaveDialog by remember { mutableStateOf(false) }
+            var sessionName by remember { mutableStateOf(viewModel.generateSessionName()) }
+
+            // Загружаем список сессий
+            LaunchedEffect(Unit) {
+                sessions = viewModel.getSessions()
+            }
+
+            AlertDialog(
+                onDismissRequest = { showSessionsDialog = false },
+                title = { Text("Sessions") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        // Кнопка сохранения
+                        Button(
+                            onClick = { showSaveDialog = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = uiState.peers.isNotEmpty()
+                        ) {
+                            Icon(Icons.Default.Save, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Save Current (${uiState.peers.size} peers)")
+                        }
+
+                        if (sessions.isEmpty()) {
+                            Text(
+                                "No saved sessions",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            Text("Saved sessions:", style = MaterialTheme.typography.labelMedium)
+                            sessions.forEach { session ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            viewModel.loadSession(session.fileName)
+                                            showSessionsDialog = false
+                                        }
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(session.name, style = MaterialTheme.typography.bodyMedium)
+                                            Text(
+                                                "${session.peersCount} peers (${session.availableCount} ok)",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = {
+                                                viewModel.deleteSession(session.fileName)
+                                                scope.launch { sessions = viewModel.getSessions() }
+                                            }
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Delete, null,
+                                                tint = MaterialTheme.colorScheme.error
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    OutlinedButton(onClick = { showSessionsDialog = false }) {
+                        Text("Close")
+                    }
+                }
+            )
+
+            // Диалог для ввода имени сессии
+            if (showSaveDialog) {
+                AlertDialog(
+                    onDismissRequest = { showSaveDialog = false },
+                    title = { Text("Save Session") },
+                    text = {
+                        OutlinedTextField(
+                            value = sessionName,
+                            onValueChange = { sessionName = it },
+                            label = { Text("Session name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                viewModel.saveSession(sessionName)
+                                showSaveDialog = false
+                                showSessionsDialog = false
+                            },
+                            enabled = sessionName.isNotBlank()
+                        ) {
+                            Text("Save")
+                        }
+                    },
+                    dismissButton = {
+                        OutlinedButton(onClick = { showSaveDialog = false }) {
+                            Text("Cancel")
+                        }
+                    }
+                )
+            }
+        }
+
         // Progress section
         if (uiState.isSearching) {
             LinearProgressIndicator(
@@ -549,6 +682,7 @@ fun PeerListItem(
                 address = peer.address,
                 protocol = peer.protocol,
                 region = peer.region,
+                geoIp = peer.geoIp,
                 isAlive = peer.isAlive(),
                 pingMs = peer.pingMs,
                 yggRttMs = peer.yggRttMs,
@@ -577,6 +711,7 @@ fun PeerListItem(
                         address = result.target,
                         protocol = peer.protocol, // протокол от основного
                         region = peer.region,     // регион от основного
+                        geoIp = peer.geoIp,       // geoIp от основного
                         isAlive = fallbackIsAlive,
                         pingMs = result.pingTime,
                         yggRttMs = result.yggRtt,
@@ -601,6 +736,7 @@ private fun PeerEntryRow(
     address: String,
     protocol: String,
     region: String,
+    geoIp: String = "",
     isAlive: Boolean,
     pingMs: Long,
     yggRttMs: Long,
@@ -648,7 +784,7 @@ private fun PeerEntryRow(
             )
         }
         
-        // Вторая строка: протокол + регион
+        // Вторая строка: протокол + регион + GeoIP
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -660,11 +796,20 @@ private fun PeerEntryRow(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.primary
             )
-            Text(
-                text = region.replaceFirstChar { it.uppercase() },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (region.isNotEmpty()) {
+                Text(
+                    text = region.replaceFirstChar { it.uppercase() },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (geoIp.isNotEmpty()) {
+                Text(
+                    text = geoIp,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.secondary
+                )
+            }
         }
         
         // Третья строка: результаты проверок

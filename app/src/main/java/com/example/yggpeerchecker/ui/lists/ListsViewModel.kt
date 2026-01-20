@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.yggpeerchecker.data.database.Host
 import com.example.yggpeerchecker.data.repository.HostRepository
 import com.example.yggpeerchecker.utils.PersistentLogger
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,6 +16,8 @@ import kotlinx.coroutines.launch
 
 data class ListsUiState(
     val isLoading: Boolean = false,
+    val isDnsLoading: Boolean = false,    // DNS операция активна
+    val isGeoIpLoading: Boolean = false,  // GeoIP операция активна
     val statusMessage: String = "Ready",
     val hosts: List<Host> = emptyList(),
     val totalCount: Int = 0,
@@ -31,6 +34,10 @@ class ListsViewModel(
 
     private val _uiState = MutableStateFlow(ListsUiState())
     val uiState: StateFlow<ListsUiState> = _uiState.asStateFlow()
+
+    // Job для отмены DNS/GeoIP операций
+    private var dnsJob: Job? = null
+    private var geoIpJob: Job? = null
 
     init {
         // Подписка на Flow из репозитория
@@ -196,9 +203,66 @@ class ListsViewModel(
         }
     }
 
-    fun fillDnsIps() {
+    fun loadVlessList() {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, lastError = null) }
+            val result = repository.loadVlessList(HostRepository.SOURCE_VLESS_SUB) { status ->
+                _uiState.update { it.copy(statusMessage = status) }
+            }
+            result.fold(
+                onSuccess = { count ->
+                    _uiState.update { it.copy(isLoading = false, statusMessage = "Loaded $count vless hosts") }
+                },
+                onFailure = { error ->
+                    _uiState.update { it.copy(isLoading = false, statusMessage = "Error: ${error.message}", lastError = error.message) }
+                }
+            )
+        }
+    }
+
+    fun loadMiniWhite() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, lastError = null) }
+            val result = repository.loadMiniList(HostRepository.SOURCE_MINI_WHITE, "Mini White") { status ->
+                _uiState.update { it.copy(statusMessage = status) }
+            }
+            result.fold(
+                onSuccess = { count ->
+                    _uiState.update { it.copy(isLoading = false, statusMessage = "Loaded $count hosts (Mini White)") }
+                },
+                onFailure = { error ->
+                    _uiState.update { it.copy(isLoading = false, statusMessage = "Error: ${error.message}", lastError = error.message) }
+                }
+            )
+        }
+    }
+
+    fun loadMiniBlack() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, lastError = null) }
+            val result = repository.loadMiniList(HostRepository.SOURCE_MINI_BLACK, "Mini Black") { status ->
+                _uiState.update { it.copy(statusMessage = status) }
+            }
+            result.fold(
+                onSuccess = { count ->
+                    _uiState.update { it.copy(isLoading = false, statusMessage = "Loaded $count hosts (Mini Black)") }
+                },
+                onFailure = { error ->
+                    _uiState.update { it.copy(isLoading = false, statusMessage = "Error: ${error.message}", lastError = error.message) }
+                }
+            )
+        }
+    }
+
+    fun fillDnsIps() {
+        // Если уже выполняется - отменяем
+        if (_uiState.value.isDnsLoading) {
+            cancelDns()
+            return
+        }
+
+        dnsJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, isDnsLoading = true, lastError = null) }
             val result = repository.fillDnsIps { current, total ->
                 _uiState.update { it.copy(statusMessage = "DNS resolving: $current/$total") }
             }
@@ -211,18 +275,32 @@ class ListsViewModel(
                     }
                     _uiState.update { it.copy(
                         isLoading = false,
+                        isDnsLoading = false,
                         statusMessage = msg
                     )}
                 },
                 onFailure = { error ->
                     _uiState.update { it.copy(
                         isLoading = false,
+                        isDnsLoading = false,
                         statusMessage = "Error: ${error.message}",
                         lastError = error.message
                     )}
                 }
             )
         }
+    }
+
+    // Отмена DNS операции
+    fun cancelDns() {
+        dnsJob?.cancel()
+        dnsJob = null
+        _uiState.update { it.copy(
+            isLoading = false,
+            isDnsLoading = false,
+            statusMessage = "DNS cancelled"
+        )}
+        logger.appendLogSync("INFO", "DNS operation cancelled")
     }
 
     fun clearDns() {
@@ -289,8 +367,14 @@ class ListsViewModel(
 
     // GeoIP резолвинг для хостов
     fun fillGeoIp(hostIds: List<String>? = null) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, lastError = null) }
+        // Если уже выполняется - отменяем
+        if (_uiState.value.isGeoIpLoading) {
+            cancelGeoIp()
+            return
+        }
+
+        geoIpJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, isGeoIpLoading = true, lastError = null) }
             val result = repository.fillGeoIp(hostIds) { current, total ->
                 _uiState.update { it.copy(statusMessage = "GeoIP resolving: $current/$total") }
             }
@@ -303,18 +387,32 @@ class ListsViewModel(
                     }
                     _uiState.update { it.copy(
                         isLoading = false,
+                        isGeoIpLoading = false,
                         statusMessage = msg
                     )}
                 },
                 onFailure = { error ->
                     _uiState.update { it.copy(
                         isLoading = false,
+                        isGeoIpLoading = false,
                         statusMessage = "Error: ${error.message}",
                         lastError = error.message
                     )}
                 }
             )
         }
+    }
+
+    // Отмена GeoIP операции
+    fun cancelGeoIp() {
+        geoIpJob?.cancel()
+        geoIpJob = null
+        _uiState.update { it.copy(
+            isLoading = false,
+            isGeoIpLoading = false,
+            statusMessage = "GeoIP cancelled"
+        )}
+        logger.appendLogSync("INFO", "GeoIP operation cancelled")
     }
 
     // Очистка GeoIP по списку ID (для фильтра)

@@ -9,6 +9,7 @@ data class DiscoveredPeer(
     val address: String,      // "tls://host:port"
     val protocol: String,     // "tcp", "tls", "quic", etc.
     val region: String,       // "germany", "france", etc.
+    val geoIp: String = "",   // GeoIP info "CC:City" (например "US:Washington")
     val rtt: Long,            // Best RTT for sorting (deprecated, use specific fields)
     val available: Boolean,   // Deprecated, use isAlive()
     val responseMs: Int,      // Response time from publicnodes.json

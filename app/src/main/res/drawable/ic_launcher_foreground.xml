@@ -4,12 +4,30 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Буква Y в стиле Yggdrasil mesh сети -->
+    <!-- Левая ветка Y -->
+    <path
+        android:fillColor="#76FF03"
+        android:pathData="M34,28 L42,28 L54,48 L54,56 L46,56 L34,36 Z"/>
+    <!-- Правая ветка Y -->
+    <path
+        android:fillColor="#76FF03"
+        android:pathData="M74,28 L66,28 L54,48 L54,56 L62,56 L74,36 Z"/>
+    <!-- Ствол Y -->
+    <path
+        android:fillColor="#76FF03"
+        android:pathData="M46,56 L62,56 L62,80 L46,80 Z"/>
+    <!-- Узлы сети (точки) -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M54,30 L74,50 L54,70 L34,50 Z"/>
+        android:pathData="M38,32 A4,4 0 1,1 38.01,32"/>
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M54,40 L64,50 L54,60 L44,50 Z"
-        android:strokeWidth="2"
-        android:strokeColor="#6200EE"/>
+        android:pathData="M70,32 A4,4 0 1,1 70.01,32"/>
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,52 A5,5 0 1,1 54.01,52"/>
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,76 A4,4 0 1,1 54.01,76"/>
 </vector>

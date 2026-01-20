@@ -8,12 +8,10 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 class PersistentLogger(private val context: Context) {
-    enum class LogLevel(val value: Int) {
-        OFF(-1),
-        DEBUG(0),
-        INFO(1),
-        WARN(2),
-        ERROR(3)
+    // Два режима: OFF - выключено, ALL - пишет всё
+    enum class LogLevel {
+        OFF,   // Выключено
+        ALL    // Пишет всё
     }
 
     private val logFilePath: File
@@ -25,47 +23,37 @@ class PersistentLogger(private val context: Context) {
     private val maxLogSize = 2 * 1024 * 1024 // 2 MB
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
 
-    var minLogLevel: LogLevel = LogLevel.OFF  // По умолчанию выключено
-        get() {
-            if (field == LogLevel.OFF && settingsFile.exists()) {
-                try {
-                    val level = settingsFile.readText().trim()
-                    field = LogLevel.valueOf(level)
-                } catch (e: Exception) {
-                    field = LogLevel.OFF
-                }
+    var minLogLevel: LogLevel = loadLogLevel()
+        private set
+
+    private fun loadLogLevel(): LogLevel {
+        return try {
+            if (settingsFile.exists()) {
+                val level = settingsFile.readText().trim()
+                LogLevel.valueOf(level)
+            } else {
+                LogLevel.OFF
             }
-            return field
+        } catch (e: Exception) {
+            LogLevel.OFF
         }
-        set(value) {
-            field = value
-            try {
-                settingsFile.writeText(value.name)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+    }
+
+    fun setLogLevel(level: LogLevel) {
+        minLogLevel = level
+        try {
+            settingsFile.writeText(level.name)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
+    }
 
     // Синхронная версия для callback из Go
     @Synchronized
     fun appendLogSync(level: String, message: String) {
         try {
-            // Если логирование выключено - не записываем ничего
-            if (minLogLevel == LogLevel.OFF) {
-                return
-            }
-
-            // Проверить уровень логирования
-            val logLevel = try {
-                LogLevel.valueOf(level.uppercase())
-            } catch (e: Exception) {
-                LogLevel.INFO
-            }
-
-            // Пропустить если уровень сообщения ниже минимального
-            if (logLevel.value < minLogLevel.value) {
-                return
-            }
+            // OFF = не пишем, ALL = пишем всё
+            if (minLogLevel == LogLevel.OFF) return
 
             val timestamp = dateFormat.format(Date())
             val logEntry = "[$timestamp] [$level] $message\n"

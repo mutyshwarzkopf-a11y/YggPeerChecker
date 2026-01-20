@@ -61,14 +61,36 @@ fun LogsTab(modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
 
     var logText by remember { mutableStateOf("Loading logs...") }
-    var selectedLevel by remember { mutableStateOf(logger.minLogLevel) }
+    var selectedLevel by remember { mutableStateOf(PersistentLogger.LogLevel.OFF) }
     var showLevelMenu by remember { mutableStateOf(false) }
 
-    // Load logs on first composition
+    // Загружаем настройки и логи при первой композиции
     LaunchedEffect(Unit) {
-        scope.launch {
-            withContext(Dispatchers.IO) {
-                val logs = logger.getLogFile()?.readText() ?: "No logs"
+        withContext(Dispatchers.IO) {
+            // Читаем настройки уровня логирования
+            val level = logger.minLogLevel
+            // Читаем логи безопасно
+            val logs = try {
+                val file = logger.getLogFile()
+                if (file != null && file.exists() && file.length() > 0) {
+                    // Читаем последние 50KB чтобы избежать OOM
+                    val maxSize = 50 * 1024L
+                    if (file.length() > maxSize) {
+                        file.inputStream().use { stream ->
+                            stream.skip(file.length() - maxSize)
+                            stream.bufferedReader().readText()
+                        }
+                    } else {
+                        file.readText()
+                    }
+                } else {
+                    "No logs yet. Set log level above and use the app."
+                }
+            } catch (e: Exception) {
+                "Error reading logs: ${e.message}"
+            }
+            withContext(Dispatchers.Main) {
+                selectedLevel = level
                 logText = logs
             }
         }
@@ -87,19 +109,13 @@ fun LogsTab(modifier: Modifier = Modifier) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Level dropdown button
+            // Level toggle button (OFF/ALL)
             Button(
                 onClick = { showLevelMenu = true },
                 modifier = Modifier.height(36.dp)
             ) {
                 Text(
-                    when (selectedLevel) {
-                        PersistentLogger.LogLevel.OFF -> "OFF"
-                        PersistentLogger.LogLevel.DEBUG -> "DBG"
-                        PersistentLogger.LogLevel.INFO -> "INF"
-                        PersistentLogger.LogLevel.WARN -> "WRN"
-                        PersistentLogger.LogLevel.ERROR -> "ERR"
-                    },
+                    if (selectedLevel == PersistentLogger.LogLevel.ALL) "ALL" else "OFF",
                     fontSize = 12.sp
                 )
                 Spacer(modifier = Modifier.width(4.dp))
@@ -110,27 +126,42 @@ fun LogsTab(modifier: Modifier = Modifier) {
                 )
             }
 
-            // Dropdown menu
+            // Dropdown menu - только OFF и ALL
             DropdownMenu(
                 expanded = showLevelMenu,
                 onDismissRequest = { showLevelMenu = false }
             ) {
                 listOf(
-                    PersistentLogger.LogLevel.OFF to "OFF",
-                    PersistentLogger.LogLevel.DEBUG to "DBG",
-                    PersistentLogger.LogLevel.INFO to "INF",
-                    PersistentLogger.LogLevel.WARN to "WRN",
-                    PersistentLogger.LogLevel.ERROR to "ERR"
+                    PersistentLogger.LogLevel.OFF to "OFF - выключено",
+                    PersistentLogger.LogLevel.ALL to "ALL - пишет всё"
                 ).forEach { (level, label) ->
                     DropdownMenuItem(
                         text = { Text(label) },
                         onClick = {
                             selectedLevel = level
-                            logger.minLogLevel = level
                             showLevelMenu = false
-                            scope.launch {
-                                withContext(Dispatchers.IO) {
-                                    val logs = logger.getLogFile()?.readText() ?: "No logs"
+                            scope.launch(Dispatchers.IO) {
+                                logger.setLogLevel(level)
+                                // Читаем логи безопасно
+                                val logs = try {
+                                    val file = logger.getLogFile()
+                                    if (file != null && file.exists() && file.length() > 0) {
+                                        val maxSize = 50 * 1024L
+                                        if (file.length() > maxSize) {
+                                            file.inputStream().use { stream ->
+                                                stream.skip(file.length() - maxSize)
+                                                stream.bufferedReader().readText()
+                                            }
+                                        } else {
+                                            file.readText()
+                                        }
+                                    } else {
+                                        "No logs yet. Set log level and use the app."
+                                    }
+                                } catch (e: Exception) {
+                                    "Error reading logs: ${e.message}"
+                                }
+                                withContext(Dispatchers.Main) {
                                     logText = logs
                                 }
                             }
@@ -144,13 +175,13 @@ fun LogsTab(modifier: Modifier = Modifier) {
             // Clear icon
             IconButton(
                 onClick = {
-                    scope.launch {
-                        withContext(Dispatchers.IO) {
-                            logger.getLogFile()?.delete()
+                    scope.launch(Dispatchers.IO) {
+                        logger.getLogFile()?.delete()
+                        withContext(Dispatchers.Main) {
                             logText = "Logs cleared"
+                            Toast.makeText(context, "Logs cleared", Toast.LENGTH_SHORT).show()
                         }
                     }
-                    Toast.makeText(context, "Logs cleared", Toast.LENGTH_SHORT).show()
                 },
                 modifier = Modifier.size(36.dp)
             ) {
@@ -165,20 +196,21 @@ fun LogsTab(modifier: Modifier = Modifier) {
             // Share icon
             IconButton(
                 onClick = {
-                    scope.launch {
-                        withContext(Dispatchers.IO) {
-                            val logFile = logger.getLogFile()
-                            if (logFile != null) {
-                                val uri = FileProvider.getUriForFile(
-                                    context,
-                                    "${context.packageName}.fileprovider",
-                                    logFile
-                                )
-                                val intent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "text/plain"
-                                    putExtra(Intent.EXTRA_STREAM, uri)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                }
+                    scope.launch(Dispatchers.IO) {
+                        val logFile = logger.getLogFile()
+                        if (logFile != null) {
+                            val uri = FileProvider.getUriForFile(
+                                context,
+                                "${context.packageName}.fileprovider",
+                                logFile
+                            )
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            // startActivity должен вызываться на Main thread
+                            withContext(Dispatchers.Main) {
                                 context.startActivity(Intent.createChooser(intent, "Share Logs"))
                             }
                         }

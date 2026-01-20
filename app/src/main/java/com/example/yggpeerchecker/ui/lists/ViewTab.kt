@@ -19,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Public
@@ -89,7 +90,9 @@ fun ViewTab(
             "NoDNS" to hosts.count { !hasDnsResolved(it) && !isIpOnly(it) },
             "IPv6" to hosts.count { isIpv6Host(it) },
             "IPv4" to hosts.count { isIpv4Host(it) },
-            "IpOnly" to hosts.count { isIpOnly(it) }
+            "IpOnly" to hosts.count { isIpOnly(it) },
+            "Geo" to hosts.count { it.geoIp != null },
+            "NoGeo" to hosts.count { it.geoIp == null }
         )
     }
 
@@ -101,6 +104,8 @@ fun ViewTab(
             "IPv6" -> typeFilteredHosts.filter { isIpv6Host(it) }
             "IPv4" -> typeFilteredHosts.filter { isIpv4Host(it) }
             "IpOnly" -> typeFilteredHosts.filter { isIpOnly(it) }
+            "Geo" -> typeFilteredHosts.filter { it.geoIp != null }
+            "NoGeo" -> typeFilteredHosts.filter { it.geoIp == null }
             else -> typeFilteredHosts
         }
     }
@@ -118,17 +123,25 @@ fun ViewTab(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Fill DNS
+            // Fill DNS - с возможностью отмены
             OutlinedButton(
                 onClick = { viewModel.fillDnsIps() },
-                enabled = !uiState.isLoading && uiState.totalCount > 0,
+                enabled = uiState.isDnsLoading || (!uiState.isLoading && uiState.totalCount > 0),
                 modifier = Modifier.height(32.dp),
-                contentPadding = PaddingValues(horizontal = 10.dp)
+                contentPadding = PaddingValues(horizontal = 10.dp),
+                colors = if (uiState.isDnsLoading) {
+                    ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                } else {
+                    ButtonDefaults.outlinedButtonColors()
+                }
             ) {
-                if (uiState.isLoading && uiState.statusMessage.contains("DNS")) {
-                    CircularProgressIndicator(
+                if (uiState.isDnsLoading) {
+                    // Показываем крестик при активной операции
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Cancel",
                         modifier = Modifier.size(14.dp),
-                        strokeWidth = 2.dp
+                        tint = MaterialTheme.colorScheme.error
                     )
                 } else {
                     Icon(
@@ -138,7 +151,7 @@ fun ViewTab(
                     )
                 }
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("Fill DNS", fontSize = 11.sp)
+                Text(if (uiState.isDnsLoading) "Cancel" else "Fill DNS", fontSize = 11.sp)
             }
 
             // Clear DNS & GeoIP - по активному фильтру (оранжевая кнопка)
@@ -164,28 +177,37 @@ fun ViewTab(
                 Text("Clr (${hostsWithDnsOrGeo.size})", fontSize = 11.sp)
             }
 
-            // Fill GeoIP
-            val geoIpHostsInFilter = filteredHosts.filter { 
-                it.geoIp == null && (it.dnsIp1 != null || 
-                    it.address.matches(Regex("^[0-9.:]+$")) || 
-                    it.address.startsWith("["))
+            // Fill GeoIP - счетчик показывает ВСЕ хосты без GeoIP, не только видимые
+            val allHostsNeedingGeoIp = uiState.hosts.filter { host ->
+                host.geoIp == null && (host.dnsIp1 != null || isIpOnly(host))
             }
             OutlinedButton(
-                onClick = { 
-                    val ids = geoIpHostsInFilter.map { it.id }
-                    viewModel.fillGeoIp(ids)
+                onClick = {
+                    // Если уже выполняется - viewModel сам отменит при повторном нажатии
+                    if (uiState.isGeoIpLoading) {
+                        viewModel.fillGeoIp(null) // Вызов отменит текущую операцию
+                    } else {
+                        // Заполняем GeoIP для всех хостов без него
+                        val ids = allHostsNeedingGeoIp.map { it.id }
+                        viewModel.fillGeoIp(ids)
+                    }
                 },
-                enabled = !uiState.isLoading && geoIpHostsInFilter.isNotEmpty(),
+                enabled = uiState.isGeoIpLoading || (!uiState.isLoading && allHostsNeedingGeoIp.isNotEmpty()),
                 modifier = Modifier.height(32.dp),
                 contentPadding = PaddingValues(horizontal = 10.dp),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = MaterialTheme.colorScheme.secondary
-                )
+                colors = if (uiState.isGeoIpLoading) {
+                    ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                } else {
+                    ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.secondary)
+                }
             ) {
-                if (uiState.isLoading && uiState.statusMessage.contains("GeoIP")) {
-                    CircularProgressIndicator(
+                if (uiState.isGeoIpLoading) {
+                    // Показываем крестик при активной операции
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Cancel",
                         modifier = Modifier.size(14.dp),
-                        strokeWidth = 2.dp
+                        tint = MaterialTheme.colorScheme.error
                     )
                 } else {
                     Icon(
@@ -195,7 +217,10 @@ fun ViewTab(
                     )
                 }
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("GeoIP (${geoIpHostsInFilter.size})", fontSize = 11.sp)
+                Text(
+                    if (uiState.isGeoIpLoading) "Cancel" else "GeoIP (${allHostsNeedingGeoIp.size})",
+                    fontSize = 11.sp
+                )
             }
 
             // Clear Visible
@@ -241,7 +266,7 @@ fun ViewTab(
             }
         }
 
-        // Третья строка - фильтры по адресу (All/DNS/NoDNS/IPv6/IPv4/IpOnly)
+        // Третья строка - фильтры по адресу (All/DNS/NoDNS/IPv6/IPv4/IpOnly/Geo/NoGeo)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -250,7 +275,7 @@ fun ViewTab(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            listOf("All", "DNS", "NoDNS", "IPv6", "IPv4", "IpOnly").forEach { filter ->
+            listOf("All", "DNS", "NoDNS", "IPv6", "IPv4", "IpOnly", "Geo", "NoGeo").forEach { filter ->
                 FilterChip(
                     selected = addressFilter == filter,
                     onClick = { addressFilter = filter },
@@ -393,35 +418,60 @@ private fun HostItem(host: Host) {
         Column(
             modifier = Modifier.padding(12.dp)
         ) {
-            // Первая строка: тип хоста + индикатор DNS
+            // Первая строка: тип хоста + регион + GeoIP CC:City + иконки
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Тип хоста (TCP/TLS/QUIC/WS/WSS/SNI/HTTP/HTTPS)
-                Text(
-                    text = host.hostType.uppercase(),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = when {
-                        Host.isYggType(host.hostType) -> MaterialTheme.colorScheme.primary
-                        else -> MaterialTheme.colorScheme.secondary
-                    }
-                )
-
+                // Левая часть: тип + регион + GeoIP CC:City
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
                 ) {
-                    // GeoIP индикатор
+                    // Тип хоста (TCP/TLS/QUIC/WS/WSS/SNI/HTTP/HTTPS)
+                    Text(
+                        text = host.hostType.uppercase(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when {
+                            Host.isYggType(host.hostType) -> MaterialTheme.colorScheme.primary
+                            else -> MaterialTheme.colorScheme.secondary
+                        }
+                    )
+                    // Регион из ygg списков (например Armenia)
+                    host.region?.let { region ->
+                        Text(
+                            text = region.replaceFirstChar { it.uppercase() },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    // GeoIP CC:City (например US:Washington)
                     host.geoIp?.let { geo ->
                         Text(
                             text = geo,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.secondary
+                            color = MaterialTheme.colorScheme.tertiary
                         )
                     }
-                    // Индикатор DNS (визуальный значек резолва)
+                }
+
+                // Правая часть: иконки (GeoIP + DNS)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Иконка GeoIP (если заполнено)
+                    if (host.geoIp != null) {
+                        Icon(
+                            imageVector = Icons.Default.Public,
+                            contentDescription = "GeoIP resolved",
+                            tint = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    // Иконка DNS (если резолвлено)
                     if (host.dnsIp1 != null) {
                         Icon(
                             imageVector = Icons.Default.Dns,
@@ -452,12 +502,13 @@ private fun HostItem(host: Host) {
                 overflow = TextOverflow.Ellipsis
             )
 
-            // DNS IP - дата резолва отдельной строкой, затем 3 адреса
-            Column(
-                modifier = Modifier.padding(top = 4.dp)
-            ) {
-                // Дата резолва над всеми IP (если есть хоть один)
-                if (host.dnsIp1 != null || host.dnsIp2 != null || host.dnsIp3 != null) {
+            // DNS IP - дата резолва отдельной строкой, затем только заполненные адреса
+            val dnsIps = listOfNotNull(host.dnsIp1, host.dnsIp2, host.dnsIp3)
+            if (dnsIps.isNotEmpty()) {
+                Column(
+                    modifier = Modifier.padding(top = 4.dp)
+                ) {
+                    // Дата резолва над всеми IP
                     host.dnsTimestamp?.let { ts ->
                         Text(
                             text = "Resolved: ${formatDate(ts)}",
@@ -466,40 +517,17 @@ private fun HostItem(host: Host) {
                             modifier = Modifier.padding(bottom = 2.dp)
                         )
                     }
+
+                    // Только заполненные IP
+                    dnsIps.forEachIndexed { index, ip ->
+                        Text(
+                            text = "IP${index + 1}: $ip",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
                 }
-
-                // IP1
-                Text(
-                    text = "IP1: ${host.dnsIp1 ?: "---"}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (host.dnsIp1 != null)
-                        MaterialTheme.colorScheme.onSurface
-                    else
-                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                    fontFamily = FontFamily.Monospace
-                )
-
-                // IP2
-                Text(
-                    text = "IP2: ${host.dnsIp2 ?: "---"}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (host.dnsIp2 != null)
-                        MaterialTheme.colorScheme.onSurface
-                    else
-                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                    fontFamily = FontFamily.Monospace
-                )
-
-                // IP3
-                Text(
-                    text = "IP3: ${host.dnsIp3 ?: "---"}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (host.dnsIp3 != null)
-                        MaterialTheme.colorScheme.onSurface
-                    else
-                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                    fontFamily = FontFamily.Monospace
-                )
             }
 
             // Источник и дата добавления
