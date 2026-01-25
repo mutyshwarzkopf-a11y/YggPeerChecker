@@ -24,6 +24,7 @@ data class ListsUiState(
     val yggCount: Int = 0,
     val sniCount: Int = 0,
     val resolvedCount: Int = 0,
+    val lastSkipCount: Int = 0,           // Пропущено дубликатов при последней загрузке
     val lastError: String? = null
 )
 
@@ -92,10 +93,13 @@ class ListsViewModel(
                 _uiState.update { it.copy(statusMessage = status) }
             }
             result.fold(
-                onSuccess = { count ->
+                onSuccess = { (added, skipped) ->
+                    val msg = if (skipped > 0) "Loaded $added peers, skip: $skipped (neilalexander)"
+                              else "Loaded $added peers (neilalexander)"
                     _uiState.update { it.copy(
                         isLoading = false,
-                        statusMessage = "Loaded $count peers (neilalexander)"
+                        statusMessage = msg,
+                        lastSkipCount = skipped
                     )}
                 },
                 onFailure = { error ->
@@ -118,10 +122,13 @@ class ListsViewModel(
                 _uiState.update { it.copy(statusMessage = status) }
             }
             result.fold(
-                onSuccess = { count ->
+                onSuccess = { (added, skipped) ->
+                    val msg = if (skipped > 0) "Loaded $added peers, skip: $skipped (yggdrasil.link)"
+                              else "Loaded $added peers (yggdrasil.link)"
                     _uiState.update { it.copy(
                         isLoading = false,
-                        statusMessage = "Loaded $count peers (yggdrasil.link)"
+                        statusMessage = msg,
+                        lastSkipCount = skipped
                     )}
                 },
                 onFailure = { error ->
@@ -142,10 +149,13 @@ class ListsViewModel(
                 _uiState.update { it.copy(statusMessage = status) }
             }
             result.fold(
-                onSuccess = { count ->
+                onSuccess = { (added, skipped) ->
+                    val msg = if (skipped > 0) "Loaded $added hosts, skip: $skipped (whitelist)"
+                              else "Loaded $added hosts (whitelist)"
                     _uiState.update { it.copy(
                         isLoading = false,
-                        statusMessage = "Loaded $count hosts (whitelist)"
+                        statusMessage = msg,
+                        lastSkipCount = skipped
                     )}
                 },
                 onFailure = { error ->
@@ -164,10 +174,13 @@ class ListsViewModel(
             _uiState.update { it.copy(isLoading = true, statusMessage = "Loading from clipboard...", lastError = null) }
             val result = repository.loadFromText(text, "clipboard")
             result.fold(
-                onSuccess = { count ->
+                onSuccess = { (added, skipped) ->
+                    val msg = if (skipped > 0) "Loaded $added hosts, skip: $skipped (clipboard)"
+                              else "Loaded $added hosts from clipboard"
                     _uiState.update { it.copy(
                         isLoading = false,
-                        statusMessage = "Loaded $count hosts from clipboard"
+                        statusMessage = msg,
+                        lastSkipCount = skipped
                     )}
                 },
                 onFailure = { error ->
@@ -186,10 +199,13 @@ class ListsViewModel(
             _uiState.update { it.copy(isLoading = true, statusMessage = "Loading from file...", lastError = null) }
             val result = repository.loadFromText(text, "file:$fileName")
             result.fold(
-                onSuccess = { count ->
+                onSuccess = { (added, skipped) ->
+                    val msg = if (skipped > 0) "Loaded $added hosts, skip: $skipped ($fileName)"
+                              else "Loaded $added hosts from $fileName"
                     _uiState.update { it.copy(
                         isLoading = false,
-                        statusMessage = "Loaded $count hosts from $fileName"
+                        statusMessage = msg,
+                        lastSkipCount = skipped
                     )}
                 },
                 onFailure = { error ->
@@ -210,8 +226,10 @@ class ListsViewModel(
                 _uiState.update { it.copy(statusMessage = status) }
             }
             result.fold(
-                onSuccess = { count ->
-                    _uiState.update { it.copy(isLoading = false, statusMessage = "Loaded $count vless hosts") }
+                onSuccess = { (added, skipped) ->
+                    val msg = if (skipped > 0) "Loaded $added vless, skip: $skipped"
+                              else "Loaded $added vless hosts"
+                    _uiState.update { it.copy(isLoading = false, statusMessage = msg, lastSkipCount = skipped) }
                 },
                 onFailure = { error ->
                     _uiState.update { it.copy(isLoading = false, statusMessage = "Error: ${error.message}", lastError = error.message) }
@@ -227,8 +245,10 @@ class ListsViewModel(
                 _uiState.update { it.copy(statusMessage = status) }
             }
             result.fold(
-                onSuccess = { count ->
-                    _uiState.update { it.copy(isLoading = false, statusMessage = "Loaded $count hosts (Mini White)") }
+                onSuccess = { (added, skipped) ->
+                    val msg = if (skipped > 0) "Loaded $added hosts, skip: $skipped (Mini White)"
+                              else "Loaded $added hosts (Mini White)"
+                    _uiState.update { it.copy(isLoading = false, statusMessage = msg, lastSkipCount = skipped) }
                 },
                 onFailure = { error ->
                     _uiState.update { it.copy(isLoading = false, statusMessage = "Error: ${error.message}", lastError = error.message) }
@@ -244,8 +264,10 @@ class ListsViewModel(
                 _uiState.update { it.copy(statusMessage = status) }
             }
             result.fold(
-                onSuccess = { count ->
-                    _uiState.update { it.copy(isLoading = false, statusMessage = "Loaded $count hosts (Mini Black)") }
+                onSuccess = { (added, skipped) ->
+                    val msg = if (skipped > 0) "Loaded $added hosts, skip: $skipped (Mini Black)"
+                              else "Loaded $added hosts (Mini Black)"
+                    _uiState.update { it.copy(isLoading = false, statusMessage = msg, lastSkipCount = skipped) }
                 },
                 onFailure = { error ->
                     _uiState.update { it.copy(isLoading = false, statusMessage = "Error: ${error.message}", lastError = error.message) }

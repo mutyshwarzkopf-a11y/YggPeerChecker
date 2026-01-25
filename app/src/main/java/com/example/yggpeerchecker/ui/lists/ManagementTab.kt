@@ -9,9 +9,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -52,6 +56,36 @@ import androidx.compose.ui.unit.dp
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
+// Кнопка с поддержкой long press для открытия URL
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LongPressButton(
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit
+) {
+    Surface(
+        modifier = modifier
+            .combinedClickable(
+                enabled = enabled,
+                onClick = onClick,
+                onLongClick = onLongClick
+            ),
+        shape = MaterialTheme.shapes.medium,
+        color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+        contentColor = if (enabled) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+            content = content
+        )
+    }
+}
+
 // Вспомогательная функция для открытия URL в браузере
 private fun openUrl(context: Context, url: String) {
     try {
@@ -60,6 +94,49 @@ private fun openUrl(context: Context, url: String) {
     } catch (e: Exception) {
         Toast.makeText(context, "Cannot open URL", Toast.LENGTH_SHORT).show()
     }
+}
+
+// Конвертация raw GitHub URL в URL папки или корня репо на GitHub
+private fun getGitHubFolderUrl(rawUrl: String): String {
+    // https://github.com/user/repo/raw/refs/heads/branch/path/file.txt -> https://github.com/user/repo/tree/branch/path
+    // https://github.com/user/repo/raw/refs/heads/branch/file.txt -> https://github.com/user/repo (файл в корне)
+    val rawRefsPattern = Regex("""https://github\.com/([^/]+)/([^/]+)/raw/refs/heads/([^/]+)/(.*)$""")
+    rawRefsPattern.find(rawUrl)?.let { match ->
+        val (user, repo, branch, pathWithFile) = match.destructured
+        val path = pathWithFile.substringBeforeLast("/", "")
+        return if (path.isNotEmpty()) {
+            "https://github.com/$user/$repo/tree/$branch/$path"
+        } else {
+            "https://github.com/$user/$repo"
+        }
+    }
+
+    // https://raw.githubusercontent.com/user/repo/refs/heads/branch/path/file.txt
+    val rawGHRefsPattern = Regex("""https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/refs/heads/([^/]+)/(.*)$""")
+    rawGHRefsPattern.find(rawUrl)?.let { match ->
+        val (user, repo, branch, pathWithFile) = match.destructured
+        val path = pathWithFile.substringBeforeLast("/", "")
+        return if (path.isNotEmpty()) {
+            "https://github.com/$user/$repo/tree/$branch/$path"
+        } else {
+            "https://github.com/$user/$repo"
+        }
+    }
+
+    // https://raw.githubusercontent.com/user/repo/branch/path/file.txt (старый формат без refs/heads)
+    val rawGHPattern = Regex("""https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.*)$""")
+    rawGHPattern.find(rawUrl)?.let { match ->
+        val (user, repo, branch, pathWithFile) = match.destructured
+        val path = pathWithFile.substringBeforeLast("/", "")
+        return if (path.isNotEmpty()) {
+            "https://github.com/$user/$repo/tree/$branch/$path"
+        } else {
+            "https://github.com/$user/$repo"
+        }
+    }
+
+    // Для не-GitHub URL - просто убираем имя файла
+    return rawUrl.substringBeforeLast("/")
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -130,6 +207,7 @@ fun ManagementTab(
                     StatItem("Ygg", uiState.yggCount)
                     StatItem("SNI", uiState.sniCount)
                     StatItem("DNS", uiState.resolvedCount)
+                    StatItem("SKIP", uiState.lastSkipCount)
                 }
             }
         }
@@ -155,30 +233,22 @@ fun ManagementTab(
             modifier = Modifier.padding(top = 8.dp)
         )
 
-        Button(
+        LongPressButton(
             onClick = { viewModel.loadYggNeilalexander() },
-            modifier = Modifier
-                .fillMaxWidth()
-                .combinedClickable(
-                    onClick = { viewModel.loadYggNeilalexander() },
-                    onLongClick = { openUrl(context, HostRepository.SOURCE_NEILALEXANDER.substringBeforeLast("/")) }
-                ),
-            enabled = !uiState.isLoading
+            onLongClick = { openUrl(context, getGitHubFolderUrl(HostRepository.SOURCE_NEILALEXANDER)) },
+            enabled = !uiState.isLoading,
+            modifier = Modifier.fillMaxWidth()
         ) {
             Icon(Icons.Default.Download, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
             Text("Load (neilalexander)")
         }
 
-        Button(
+        LongPressButton(
             onClick = { viewModel.loadYggLink() },
-            modifier = Modifier
-                .fillMaxWidth()
-                .combinedClickable(
-                    onClick = { viewModel.loadYggLink() },
-                    onLongClick = { openUrl(context, HostRepository.SOURCE_YGGDRASIL_LINK.substringBeforeLast("/")) }
-                ),
-            enabled = !uiState.isLoading
+            onLongClick = { openUrl(context, getGitHubFolderUrl(HostRepository.SOURCE_YGGDRASIL_LINK)) },
+            enabled = !uiState.isLoading,
+            modifier = Modifier.fillMaxWidth()
         ) {
             Icon(Icons.Default.Download, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
@@ -192,19 +262,15 @@ fun ManagementTab(
             modifier = Modifier.padding(top = 8.dp)
         )
 
-        Button(
+        LongPressButton(
             onClick = { viewModel.loadVlessList() },
-            modifier = Modifier
-                .fillMaxWidth()
-                .combinedClickable(
-                    onClick = { viewModel.loadVlessList() },
-                    onLongClick = { openUrl(context, HostRepository.SOURCE_VLESS_SUB.substringBeforeLast("/")) }
-                ),
-            enabled = !uiState.isLoading
+            onLongClick = { openUrl(context, getGitHubFolderUrl(HostRepository.SOURCE_VLESS_SUB)) },
+            enabled = !uiState.isLoading,
+            modifier = Modifier.fillMaxWidth()
         ) {
             Icon(Icons.Default.VpnKey, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
-            Text("Load Vless List")
+            Text("Load Vless (zieng)")
         }
 
         // Загрузка whitelist
@@ -214,15 +280,11 @@ fun ManagementTab(
             modifier = Modifier.padding(top = 8.dp)
         )
 
-        Button(
+        LongPressButton(
             onClick = { viewModel.loadWhitelist() },
-            modifier = Modifier
-                .fillMaxWidth()
-                .combinedClickable(
-                    onClick = { viewModel.loadWhitelist() },
-                    onLongClick = { openUrl(context, HostRepository.SOURCE_RU_WHITELIST.substringBeforeLast("/")) }
-                ),
-            enabled = !uiState.isLoading
+            onLongClick = { openUrl(context, getGitHubFolderUrl(HostRepository.SOURCE_RU_WHITELIST)) },
+            enabled = !uiState.isLoading,
+            modifier = Modifier.fillMaxWidth()
         ) {
             Icon(Icons.Default.Security, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
@@ -234,28 +296,24 @@ fun ManagementTab(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            OutlinedButton(
+            LongPressButton(
                 onClick = { viewModel.loadMiniWhite() },
-                modifier = Modifier
-                    .weight(1f)
-                    .combinedClickable(
-                        onClick = { viewModel.loadMiniWhite() },
-                        onLongClick = { openUrl(context, HostRepository.SOURCE_MINI_WHITE.substringBeforeLast("/")) }
-                    ),
-                enabled = !uiState.isLoading
+                onLongClick = { openUrl(context, getGitHubFolderUrl(HostRepository.SOURCE_MINI_WHITE)) },
+                enabled = !uiState.isLoading,
+                modifier = Modifier.weight(1f)
             ) {
+                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
                 Text("Mini White")
             }
-            OutlinedButton(
+            LongPressButton(
                 onClick = { viewModel.loadMiniBlack() },
-                modifier = Modifier
-                    .weight(1f)
-                    .combinedClickable(
-                        onClick = { viewModel.loadMiniBlack() },
-                        onLongClick = { openUrl(context, HostRepository.SOURCE_MINI_BLACK.substringBeforeLast("/")) }
-                    ),
-                enabled = !uiState.isLoading
+                onLongClick = { openUrl(context, getGitHubFolderUrl(HostRepository.SOURCE_MINI_BLACK)) },
+                enabled = !uiState.isLoading,
+                modifier = Modifier.weight(1f)
             ) {
+                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
                 Text("Mini Black")
             }
         }

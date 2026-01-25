@@ -43,6 +43,9 @@ interface HostDao {
     @Query("SELECT COUNT(*) FROM hosts WHERE hostType IN ('sni', 'http', 'https')")
     fun getSniHostsCount(): Flow<Int>
 
+    @Query("SELECT COUNT(*) FROM hosts WHERE hostType IN ('vless', 'vmess')")
+    fun getVlessHostsCount(): Flow<Int>
+
     @Query("SELECT COUNT(*) FROM hosts WHERE dnsIp1 IS NOT NULL")
     fun getResolvedHostsCount(): Flow<Int>
 
@@ -92,6 +95,9 @@ interface HostDao {
     @Query("SELECT COUNT(*) FROM hosts WHERE hostType IN ('sni', 'http', 'https')")
     suspend fun getSniHostsCountSync(): Int
 
+    @Query("SELECT COUNT(*) FROM hosts WHERE hostType IN ('vless', 'vmess')")
+    suspend fun getVlessHostsCountSync(): Int
+
     @Query("SELECT * FROM hosts WHERE hostType IN ('tcp', 'tls', 'quic', 'ws', 'wss')")
     suspend fun getYggHosts(): List<Host>
 
@@ -107,4 +113,16 @@ interface HostDao {
 
     @Query("SELECT * FROM hosts WHERE geoIp IS NULL")
     suspend fun getHostsWithoutGeoIp(): List<Host>
+
+    // Получение уникальных источников для фильтра
+    @Query("SELECT DISTINCT source FROM hosts")
+    suspend fun getDistinctSources(): List<String>
+
+    // Подсчёт хостов по источнику
+    @Query("SELECT COUNT(*) FROM hosts WHERE source = :source")
+    suspend fun getHostCountBySource(source: String): Int
+
+    // Получение хостов по источнику
+    @Query("SELECT * FROM hosts WHERE source = :source ORDER BY dateAdded DESC")
+    suspend fun getHostsBySourceList(source: String): List<Host>
 }

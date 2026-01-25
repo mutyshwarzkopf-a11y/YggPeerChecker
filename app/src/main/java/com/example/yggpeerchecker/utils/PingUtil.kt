@@ -40,20 +40,9 @@ object PingUtil {
 
     /**
      * Extract hostname from address like "tcp://example.com:8080"
+     * Делегируем UrlParser
      */
-    fun extractHost(address: String): String? {
-        return try {
-            val parts = address.split("://")
-            if (parts.size < 2) return null
-
-            val hostPort = parts[1]
-            // Remove port and query parameters
-            val host = hostPort.split(":")[0].split("?")[0]
-            host.takeIf { it.isNotEmpty() && !it.contains("/") }
-        } catch (e: Exception) {
-            null
-        }
-    }
+    fun extractHost(address: String): String? = UrlParser.extractHostname(address)
 
     /**
      * Check if address looks like it can be pinged (has hostname or IP)

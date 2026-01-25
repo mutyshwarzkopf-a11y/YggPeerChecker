@@ -4,7 +4,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.net.URI
 import javax.net.ssl.SSLSocketFactory
 
 /**
@@ -110,40 +109,15 @@ object YggConnectChecker {
     }
 
     /**
-     * Парсит URI и извлекает host, port, protocol
+     * Парсит URI и извлекает host, port, protocol (делегируем UrlParser)
      */
     private fun parseUri(uriString: String): Triple<String, Int, String> {
-        // Убираем query параметры для парсинга
-        val cleanUri = uriString.split("?")[0]
-        
-        return try {
-            val uri = URI(cleanUri)
-            var host = uri.host ?: throw IllegalArgumentException("No host in URI")
-            val port = uri.port
-            val protocol = uri.scheme?.lowercase() ?: "tcp"
-            
-            if (port <= 0) {
-                throw IllegalArgumentException("Invalid port in URI")
-            }
-            
-            // Убираем IPv6 скобки если есть
-            if (host.startsWith("[") && host.endsWith("]")) {
-                host = host.substring(1, host.length - 1)
-            }
-            
-            Triple(host, port, protocol)
-        } catch (e: Exception) {
-            // Fallback: ручной парсинг
-            val regex = Regex("""^([a-z]+)://\[?([^\]/:]+)\]?:(\d+)""")
-            val match = regex.find(uriString)
-            if (match != null) {
-                val protocol = match.groupValues[1]
-                val host = match.groupValues[2]
-                val port = match.groupValues[3].toInt()
-                Triple(host, port, protocol)
-            } else {
-                throw IllegalArgumentException("Cannot parse URI: $uriString")
-            }
-        }
+        val parsed = UrlParser.parse(uriString)
+            ?: throw IllegalArgumentException("Cannot parse URI: $uriString")
+
+        val port = parsed.port
+            ?: throw IllegalArgumentException("Invalid port in URI: $uriString")
+
+        return Triple(parsed.hostname, port, parsed.protocol)
     }
 }

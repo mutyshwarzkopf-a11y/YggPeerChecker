@@ -10,6 +10,8 @@ data class DiscoveredPeer(
     val protocol: String,     // "tcp", "tls", "quic", etc.
     val region: String,       // "germany", "france", etc.
     val geoIp: String = "",   // GeoIP info "CC:City" (например "US:Washington")
+    val source: String = "",  // Источник (URL откуда загружен)
+    val sourceShort: String = "",  // Короткое имя источника (ygg:neil, miniblack и т.д.)
     val rtt: Long,            // Best RTT for sorting (deprecated, use specific fields)
     val available: Boolean,   // Deprecated, use isAlive()
     val responseMs: Int,      // Response time from publicnodes.json
@@ -21,7 +23,11 @@ data class DiscoveredPeer(
     val yggRttMs: Long = -1,
     val portDefaultMs: Long = -1,
     val port80Ms: Long = -1,
-    val port443Ms: Long = -1
+    val port443Ms: Long = -1,
+    // Tracert hops (-1 = не проверялось)
+    val hops: Int = -1,
+    // Нормализованный ключ для сопоставления (address:port в lowercase)
+    val normalizedKey: String = ""
 ) {
     // Хост жив если есть хоть один положительный ответ по любой проверке
     fun isAlive(): Boolean = pingMs >= 0 || yggRttMs >= 0 || portDefaultMs >= 0 || port80Ms >= 0 || port443Ms >= 0
@@ -36,6 +42,9 @@ data class DiscoveredPeer(
         else -> "off"
     }
     
+    // Форматирование hops
+    fun formatHops(): String = if (hops > 0) "${hops}h" else "---"
+
     fun getErrorReason(): String = when {
         checkError.contains("timeout") -> "Timeout"
         checkError.contains("connection refused") -> "Refused"

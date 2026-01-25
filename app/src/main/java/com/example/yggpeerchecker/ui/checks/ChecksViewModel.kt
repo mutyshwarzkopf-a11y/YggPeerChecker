@@ -4,7 +4,13 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.yggpeerchecker.data.AddressType
 import com.example.yggpeerchecker.data.DiscoveredPeer
+import com.example.yggpeerchecker.data.EndpointCheckResult
+import com.example.yggpeerchecker.data.GroupedHost
+import com.example.yggpeerchecker.data.GroupedHostBuilder
+import com.example.yggpeerchecker.data.HostAddress
+import com.example.yggpeerchecker.data.HostEndpoint
 import com.example.yggpeerchecker.data.SessionManager
 import com.example.yggpeerchecker.data.database.AppDatabase
 import com.example.yggpeerchecker.data.database.Host
@@ -12,6 +18,8 @@ import com.example.yggpeerchecker.utils.NetworkUtil
 import com.example.yggpeerchecker.utils.PersistentLogger
 import com.example.yggpeerchecker.utils.PingUtil
 import com.example.yggpeerchecker.utils.SniChecker
+import com.example.yggpeerchecker.utils.TracertUtil
+import com.example.yggpeerchecker.utils.UrlParser
 import com.example.yggpeerchecker.utils.YggConnectChecker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -89,6 +97,13 @@ data class HostCheckResult(
     }
 }
 
+// Информация об источнике для фильтра
+data class SourceInfo(
+    val fullName: String,      // Полное имя (URL)
+    val shortName: String,     // Короткое имя (ygg:neil, miniblack и т.д.)
+    val count: Int             // Количество хостов
+)
+
 data class ChecksUiState(
     val isSearching: Boolean = false,
     val peers: List<DiscoveredPeer> = emptyList(),
@@ -106,7 +121,8 @@ data class ChecksUiState(
     val enabledCheckTypes: Set<CheckType> = setOf(CheckType.PING, CheckType.YGG_RTT),
     val fastMode: Boolean = false,
     val alwaysCheckDnsIps: Boolean = true,  // Всегда проверять DNS IP (default: ON)
-    val typeFilter: String = "All",
+    val typeFilter: String = "All",      // Фильтр по типу (All, Ygg, SNI)
+    val sourceFilter: String = "All",    // Фильтр по источнику (All, или shortName)
     // Сортировка и фильтр
     val sortType: CheckType = CheckType.PING,  // По какому типу сортировать
     val filterMs: Int = 0,  // 0 = выкл, >0 = фильтр по ms
@@ -114,8 +130,17 @@ data class ChecksUiState(
     val dbHostsCount: Int = 0,
     val dbYggCount: Int = 0,
     val dbSniCount: Int = 0,
+    val dbVlessCount: Int = 0,  // vless/vmess отдельно
+    // Источники для фильтра (динамически из БД)
+    val availableSources: List<SourceInfo> = emptyList(),
     // Fallback результаты
-    val hostResults: Map<String, List<HostCheckResult>> = emptyMap()
+    val hostResults: Map<String, List<HostCheckResult>> = emptyMap(),
+    // Tracert
+    val isTracertRunning: Boolean = false,
+    val tracertProgress: Int = 0,
+    // Группировка
+    val groupedHosts: List<GroupedHost> = emptyList(),
+    val selectedEndpoints: Set<String> = emptySet()  // Выбранные endpoint URLs для копирования
 )
 
 class ChecksViewModel(
@@ -131,10 +156,51 @@ class ChecksViewModel(
     private var discoveryJob: Job? = null
     private val database = AppDatabase.getDatabase(context)
     private val sessionManager = SessionManager(context)
+    private val checksPrefs = context.getSharedPreferences("checks_prefs", Context.MODE_PRIVATE)
 
     private fun getConcurrentStreams(): Int {
         val prefs = context.getSharedPreferences("ygg_prefs", Context.MODE_PRIVATE)
         return prefs.getInt("concurrent_streams", 10)
+    }
+
+    // Загрузка сохранённых настроек проверок
+    private fun loadChecksPrefs() {
+        val savedTypes = checksPrefs.getStringSet("enabled_check_types", null)
+        val enabledTypes = if (savedTypes != null) {
+            savedTypes.mapNotNull { name ->
+                try { CheckType.valueOf(name) } catch (e: Exception) { null }
+            }.toSet()
+        } else {
+            setOf(CheckType.PING, CheckType.YGG_RTT)  // default
+        }
+
+        val fastMode = checksPrefs.getBoolean("fast_mode", false)
+        val alwaysCheckDns = checksPrefs.getBoolean("always_check_dns_ips", true)
+        val sortTypeName = checksPrefs.getString("sort_type", "PING") ?: "PING"
+        val sortType = try { CheckType.valueOf(sortTypeName) } catch (e: Exception) { CheckType.PING }
+        val filterMs = checksPrefs.getInt("filter_ms", 0)
+
+        _uiState.update { it.copy(
+            enabledCheckTypes = enabledTypes,
+            fastMode = fastMode,
+            alwaysCheckDnsIps = alwaysCheckDns,
+            sortType = sortType,
+            filterMs = filterMs
+        )}
+        logger.appendLogSync("DEBUG", "Loaded checks prefs: types=$enabledTypes, fast=$fastMode, dns=$alwaysCheckDns")
+    }
+
+    // Сохранение настроек проверок
+    private fun saveChecksPrefs() {
+        val state = _uiState.value
+        checksPrefs.edit().apply {
+            putStringSet("enabled_check_types", state.enabledCheckTypes.map { it.name }.toSet())
+            putBoolean("fast_mode", state.fastMode)
+            putBoolean("always_check_dns_ips", state.alwaysCheckDnsIps)
+            putString("sort_type", state.sortType.name)
+            putInt("filter_ms", state.filterMs)
+            apply()
+        }
     }
 
     init {
@@ -147,6 +213,7 @@ class ChecksViewModel(
                 }
             })
             logger.appendLogSync("INFO", "ChecksViewModel initialized")
+            loadChecksPrefs()  // Загрузка сохранённых настроек
             loadDbStats()
         } catch (e: Exception) {
             logger.appendLogSync("ERROR", "Failed to create manager: ${e.message}")
@@ -158,12 +225,47 @@ class ChecksViewModel(
             val total = database.hostDao().getHostCount()
             val ygg = database.hostDao().getYggHostsCountSync()
             val sni = database.hostDao().getSniHostsCountSync()
+            val vless = database.hostDao().getVlessHostsCountSync()
+
+            // Загружаем уникальные источники
+            val distinctSources = database.hostDao().getDistinctSources()
+            val sourceInfoList = distinctSources.map { source ->
+                val count = database.hostDao().getHostCountBySource(source)
+                SourceInfo(
+                    fullName = source,
+                    shortName = extractShortSourceName(source),
+                    count = count
+                )
+            }.sortedByDescending { it.count }
+
             _uiState.update { it.copy(
                 dbHostsCount = total,
                 dbYggCount = ygg,
-                dbSniCount = sni
+                dbSniCount = sni,
+                dbVlessCount = vless,
+                availableSources = sourceInfoList
             )}
         }
+    }
+
+    // Извлечение короткого имени источника
+    private fun extractShortSourceName(source: String): String {
+        return when {
+            source.contains("neilalexander") -> "ygg:neil"
+            source.contains("yggdrasil.link") -> "ygg:link"
+            source.contains("whitelist") -> "whitelist"
+            source.contains("miniwhite") -> "miniwhite"
+            source.contains("miniblack") -> "miniblack"
+            source.contains("vless") || source.contains("zieng") -> "vless"
+            source.contains("clipboard") -> "clipboard"
+            source.contains("file://") || source.contains("file:") -> "file"
+            else -> source.substringAfterLast("/").take(12)
+        }
+    }
+
+    fun setSourceFilter(filter: String) {
+        _uiState.update { it.copy(sourceFilter = filter) }
+        logger.appendLogSync("DEBUG", "Source filter: $filter")
     }
 
     fun toggleCheckType(type: CheckType) {
@@ -175,28 +277,33 @@ class ChecksViewModel(
             }
             state.copy(enabledCheckTypes = newTypes)
         }
+        saveChecksPrefs()
         logger.appendLogSync("DEBUG", "Check types changed: ${_uiState.value.enabledCheckTypes}")
     }
 
     fun toggleFastMode() {
         _uiState.update { it.copy(fastMode = !it.fastMode) }
+        saveChecksPrefs()
         logger.appendLogSync("DEBUG", "Fast mode: ${_uiState.value.fastMode}")
     }
 
 
     fun toggleAlwaysCheckDnsIps() {
         _uiState.update { it.copy(alwaysCheckDnsIps = !it.alwaysCheckDnsIps) }
+        saveChecksPrefs()
         logger.appendLogSync("DEBUG", "Always Check DNS IPs: ${_uiState.value.alwaysCheckDnsIps}")
     }
 
     fun setSortType(type: CheckType) {
         _uiState.update { it.copy(sortType = type) }
+        saveChecksPrefs()
         // Пересортировать peers
         sortPeers()
     }
 
     fun setFilterMs(ms: Int) {
         _uiState.update { it.copy(filterMs = ms) }
+        saveChecksPrefs()
     }
 
     private fun sortPeers() {
@@ -287,14 +394,15 @@ class ChecksViewModel(
         }
     }
 
-    // Фильтрация хостов - пропускаем уже проверенные
+    // Фильтрация хостов - пропускаем уже проверенные (используем normalizedKey)
     private fun filterHostsForCheck(allHosts: List<Host>): List<Host> {
-        val existingPeers = _uiState.value.peers.associateBy { it.address }
+        val existingPeers = _uiState.value.peers.associateBy { it.normalizedKey }
         val existingResults = _uiState.value.hostResults
         val enabledTypes = _uiState.value.enabledCheckTypes
 
         return allHosts.filter { host ->
-            val existingPeer = existingPeers[host.hostString]
+            val hostKey = normalizeHostKey(host.address, host.port)
+            val existingPeer = existingPeers[hostKey]
             val existingResult = existingResults[host.hostString]?.firstOrNull { it.isMainAddress }
 
             // Если пир еще не проверялся - проверяем
@@ -328,18 +436,18 @@ class ChecksViewModel(
             logger.appendLogSync("INFO", "Check types: ${_uiState.value.enabledCheckTypes}")
             logger.appendLogSync("INFO", "Fast mode: ${_uiState.value.fastMode}")
 
+            val skipInfo = if (initialSkipped > 0) " (skipped $initialSkipped already checked)" else ""
             _uiState.update { it.copy(
                 isSearching = true,
                 progress = 0,
                 totalPeers = hosts.size,
                 checkedCount = 0,
-                skippedCount = 0,  // Начинаем с 0, накапливаем по ходу
-                statusMessage = "Checking ${hosts.size} hosts..."
+                skippedCount = initialSkipped,  // Начинаем с количества пропущенных хостов
+                statusMessage = "Checking ${hosts.size} hosts$skipInfo..."
             )}
 
             val semaphore = Semaphore(concurrentStreams)
             val checkedCounter = AtomicInteger(0)
-            val skippedCounter = AtomicInteger(0)
 
             val jobs = hosts.map { host ->
                 launch(Dispatchers.IO) {
@@ -351,13 +459,12 @@ class ChecksViewModel(
                         logger.appendLogSync("DEBUG", "Checking: ${host.address} (stream ${Thread.currentThread().name})")
 
                         val existingResult = _uiState.value.hostResults[host.hostString]?.firstOrNull { it.isMainAddress }
-                        val (results, skippedChecks) = checkHostWithFallback(host, existingResult)
+                        val (results, _) = checkHostWithFallback(host, existingResult)
                         val checked = checkedCounter.incrementAndGet()
-                        val totalSkipped = skippedCounter.addAndGet(skippedChecks)
 
                         withContext(Dispatchers.Main) {
                             if (!shouldStop) {
-                                addCheckResult(host, results, checked, hosts.size, totalSkipped)
+                                addCheckResult(host, results, checked, hosts.size)
                             }
                         }
                     }
@@ -367,13 +474,13 @@ class ChecksViewModel(
             jobs.forEach { it.join() }
 
             _uiState.update { state ->
-                val skipInfo = if (state.skippedCount > 0) " | Skip: ${state.skippedCount}" else ""
+                val finalSkipInfo = if (state.skippedCount > 0) " | Skip: ${state.skippedCount}" else ""
                 state.copy(
                     isSearching = false,
-                    statusMessage = "Done | OK: ${state.availableCount} | Fail: ${state.unavailableCount}$skipInfo"
+                    statusMessage = "Done | OK: ${state.availableCount} | Fail: ${state.unavailableCount}$finalSkipInfo"
                 )
             }
-            logger.appendLogSync("INFO", "Discovery completed. Skipped: ${skippedCounter.get()} checks")
+            logger.appendLogSync("INFO", "Discovery completed. Skipped: $initialSkipped hosts")
         }
     }
 
@@ -434,8 +541,11 @@ class ChecksViewModel(
             for (dnsIp in dnsIps) {
                 if (shouldStop) break
 
-                // Проверяем существующий результат для этого DNS IP
-                val existingDnsResult = existingFallbacks[dnsIp]
+                // Подставляем IP в полный адрес для отображения и поиска
+                val fallbackHostString = buildFallbackHostString(host.hostString, dnsIp)
+
+                // Проверяем существующий результат для этого DNS IP (ищем по URL с IP)
+                val existingDnsResult = existingFallbacks[fallbackHostString]
                 val dnsTypesToCheck = if (existingDnsResult != null) {
                     enabledTypes.filter { existingDnsResult.needsCheck(it) }.toSet()
                 } else {
@@ -451,8 +561,10 @@ class ChecksViewModel(
                     continue
                 }
 
-                // Подставляем IP в полный адрес для отображения
-                val fallbackHostString = buildFallbackHostString(host.hostString, dnsIp)
+                // Выполняем проверку по IP адресу
+                // Для SNI хостов передаём оригинальный hostname для TLS handshake
+                val sniHostname = if (Host.isSniType(host.hostType)) host.address else null
+
                 val dnsResult = checkSingleTarget(
                     target = dnsIp,
                     port = host.port,
@@ -461,7 +573,8 @@ class ChecksViewModel(
                     enabledTypes = dnsTypesToCheck,
                     fastMode = fastMode,
                     isMainAddress = false,
-                    displayAddress = fallbackHostString
+                    displayAddress = fallbackHostString,
+                    originalHostname = sniHostname
                 )
 
                 // Объединяем с существующими результатами
@@ -478,16 +591,24 @@ class ChecksViewModel(
 
     private fun buildFallbackHostString(originalHostString: String, ip: String): String {
         return try {
+            // Для IPv6 оборачиваем в скобки
+            val formattedIp = if (ip.contains(":") && !ip.startsWith("[")) "[$ip]" else ip
+
             // Сохраняем протокол и параметры, заменяем только хост
             val regex = Regex("(\\w+://)([^:/\\[\\]]+|\\[[^\\]]+\\])(.*)")
-            regex.replace(originalHostString) { match ->
+            val match = regex.find(originalHostString)
+
+            if (match != null) {
+                // Есть протокол - заменяем хост на IP
                 val proto = match.groupValues[1]
                 val rest = match.groupValues[3]
-                // Для IPv6 оборачиваем в скобки
-                val formattedIp = if (ip.contains(":") && !ip.startsWith("[")) "[$ip]" else ip
                 "$proto$formattedIp$rest"
+            } else {
+                // Нет протокола - возвращаем просто IP (sni:// условное обозначение, не реальный протокол)
+                formattedIp
             }
         } catch (e: Exception) {
+            // Fallback: просто IP
             ip
         }
     }
@@ -500,7 +621,8 @@ class ChecksViewModel(
         enabledTypes: Set<CheckType>,
         fastMode: Boolean,
         isMainAddress: Boolean,
-        displayAddress: String? = null  // Адрес для отображения (для DNS fallback - полный URL)
+        displayAddress: String? = null,  // Адрес для отображения (для DNS fallback - полный URL)
+        originalHostname: String? = null  // Оригинальное доменное имя для SNI (если target - IP)
     ): HostCheckResult {
         val resultTarget = displayAddress ?: target  // Что показывать в UI
         var pingTime: Long = -1
@@ -577,8 +699,17 @@ class ChecksViewModel(
 
             // Port 443
             if (enabledTypes.contains(CheckType.PORT_443)) {
-                logger.appendLogSync("DEBUG", "Port 443 check: $target")
-                val result = SniChecker.checkPort(target, 443, 3000)
+                logger.appendLogSync("DEBUG", "Port 443 check: $target" +
+                    (if (originalHostname != null) " (SNI: $originalHostname)" else ""))
+
+                // Для SNI хостов (когда target - IP, а originalHostname - доменное имя)
+                // используем TLS handshake с указанием hostname в SNI
+                val result = if (originalHostname != null && !Host.isYggType(hostType)) {
+                    SniChecker.checkPortWithSni(target, originalHostname, 443, 5000)
+                } else {
+                    SniChecker.checkPort(target, 443, 3000)
+                }
+
                 if (result.available) {
                     port443 = result.responseTime
                     available = true
@@ -586,7 +717,8 @@ class ChecksViewModel(
                     if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
                 } else {
                     port443 = -2  // Failed
-                    logger.appendLogSync("DEBUG", "Port 443 FAILED: $target")
+                    logger.appendLogSync("DEBUG", "Port 443 FAILED: $target" +
+                        (result.error?.let { " ($it)" } ?: ""))
                 }
             }
 
@@ -623,16 +755,36 @@ class ChecksViewModel(
         }
     }
 
-    private fun addCheckResult(host: Host, results: List<HostCheckResult>, current: Int, total: Int, skipped: Int = 0) {
+    // Нормализованный ключ для сопоставления пиров (address:port)
+    // Избегает дублирования когда один хост загружен в разных форматах
+    // Для хостов без порта (SNI только с именем) используем пустую строку вместо порта
+    private fun normalizeHostKey(address: String, port: Int?): String {
+        return if (port != null) {
+            "${address.lowercase()}:$port"
+        } else {
+            // Хост без порта - ключ только по адресу (чтобы избежать дублей)
+            address.lowercase()
+        }
+    }
+
+    private fun addCheckResult(host: Host, results: List<HostCheckResult>, current: Int, total: Int) {
         val mainResult = results.firstOrNull { it.isMainAddress } ?: return
         val bestResult = results.firstOrNull { it.available } ?: mainResult
         val enabledTypes = _uiState.value.enabledCheckTypes
 
-        // Конвертируем результат в значение: -1 = не проверялось, -2 = failed, >=0 = ms
-        fun checkValue(value: Long, type: CheckType): Long = when {
-            !enabledTypes.contains(type) -> -1  // не проверялось
-            value >= 0 -> value                  // успех
-            else -> -2                           // failed
+        // Нормализованный ключ для сопоставления (избегает дублирования)
+        val normalizedKey = normalizeHostKey(host.address, host.port)
+
+        // Получаем существующий пир для сохранения предыдущих результатов
+        val existingPeer = _uiState.value.peers.find { it.normalizedKey == normalizedKey }
+
+        // Конвертируем результат в значение с сохранением предыдущих:
+        // -1 = не проверялось, -2 = failed, >=0 = ms
+        // Если тип не выбран, сохраняем предыдущее значение (режим дополнения)
+        fun checkValue(value: Long, type: CheckType, previousValue: Long): Long = when {
+            !enabledTypes.contains(type) -> previousValue  // сохраняем предыдущее
+            value >= 0 -> value                             // успех
+            else -> -2                                      // failed
         }
 
         val peer = DiscoveredPeer(
@@ -640,6 +792,8 @@ class ChecksViewModel(
             protocol = host.hostType,
             region = host.region ?: extractRegion(host.source),
             geoIp = host.geoIp ?: "",
+            source = host.source,
+            sourceShort = extractShortSourceName(host.source),
             rtt = when {
                 bestResult.yggRtt >= 0 -> bestResult.yggRtt
                 bestResult.portDefault >= 0 -> bestResult.portDefault
@@ -653,18 +807,19 @@ class ChecksViewModel(
             lastSeen = System.currentTimeMillis(),
             checkError = if (!bestResult.available) bestResult.error else "",
             ping = bestResult.pingTime,
-            // Индивидуальные результаты
-            pingMs = checkValue(bestResult.pingTime, CheckType.PING),
-            yggRttMs = checkValue(bestResult.yggRtt, CheckType.YGG_RTT),
-            portDefaultMs = checkValue(bestResult.portDefault, CheckType.PORT_DEFAULT),
-            port80Ms = checkValue(bestResult.port80, CheckType.PORT_80),
-            port443Ms = checkValue(bestResult.port443, CheckType.PORT_443)
+            // Индивидуальные результаты (сохраняем предыдущие если тип не выбран)
+            pingMs = checkValue(bestResult.pingTime, CheckType.PING, existingPeer?.pingMs ?: -1),
+            yggRttMs = checkValue(bestResult.yggRtt, CheckType.YGG_RTT, existingPeer?.yggRttMs ?: -1),
+            portDefaultMs = checkValue(bestResult.portDefault, CheckType.PORT_DEFAULT, existingPeer?.portDefaultMs ?: -1),
+            port80Ms = checkValue(bestResult.port80, CheckType.PORT_80, existingPeer?.port80Ms ?: -1),
+            port443Ms = checkValue(bestResult.port443, CheckType.PORT_443, existingPeer?.port443Ms ?: -1),
+            normalizedKey = normalizedKey
         )
 
         _uiState.update { state ->
-            // Обновляем существующий или добавляем новый
+            // Обновляем существующий или добавляем новый (по normalizedKey для избежания дублей)
             val updatedPeers = state.peers.toMutableList()
-            val existingIndex = updatedPeers.indexOfFirst { it.address == peer.address }
+            val existingIndex = updatedPeers.indexOfFirst { it.normalizedKey == peer.normalizedKey }
             if (existingIndex >= 0) {
                 updatedPeers[existingIndex] = peer
             } else {
@@ -683,12 +838,12 @@ class ChecksViewModel(
             val updatedHostResults = state.hostResults.toMutableMap()
             updatedHostResults[host.hostString] = results
 
-            val skipInfo = if (skipped > 0) " | Skip: $skipped" else ""
+            // skippedCount содержит initialSkipped (пропущенные хосты)
+            val skipInfo = if (state.skippedCount > 0) " | Skip: ${state.skippedCount}" else ""
             state.copy(
                 peers = sortedPeers,
                 progress = progress,
                 checkedCount = current,
-                skippedCount = skipped,  // Обновляем skippedCount
                 availableCount = sortedPeers.count { it.available },
                 unavailableCount = sortedPeers.count { !it.available },
                 statusMessage = "Checking: $current/$total | OK: ${sortedPeers.count { it.available }}$skipInfo",
@@ -748,10 +903,21 @@ class ChecksViewModel(
 
     fun toggleSelectAll() {
         _uiState.update { state ->
-            if (state.selectedPeers.isNotEmpty()) {
-                state.copy(selectedPeers = emptySet())
+            if (state.selectedPeers.isNotEmpty() || state.selectedFallbacks.isNotEmpty()) {
+                // Снимаем выбор со всех
+                state.copy(selectedPeers = emptySet(), selectedFallbacks = emptySet())
             } else {
-                state.copy(selectedPeers = state.peers.map { it.address }.toSet())
+                // Выбираем все ЖИВЫЕ хосты (включая fallback ip1/2/3)
+                val alivePeers = state.peers.filter { it.isAlive() }.map { it.address }.toSet()
+
+                // Собираем живые fallback из hostResults
+                val aliveFallbacks = mutableSetOf<String>()
+                state.hostResults.values.forEach { results ->
+                    results.filter { !it.isMainAddress && it.available }
+                        .forEach { aliveFallbacks.add(it.target) }
+                }
+
+                state.copy(selectedPeers = alivePeers, selectedFallbacks = aliveFallbacks)
             }
         }
     }
@@ -851,6 +1017,256 @@ class ChecksViewModel(
 
     // Генерация имени сессии по умолчанию
     fun generateSessionName(): String = sessionManager.generateDefaultName()
+
+    // Tracert для живых хостов
+    private var tracertJob: Job? = null
+
+    fun runTracert() {
+        if (_uiState.value.isTracertRunning) {
+            // Отмена текущего Tracert
+            tracertJob?.cancel()
+            tracertJob = null
+            _uiState.update { it.copy(isTracertRunning = false, statusMessage = "Tracert cancelled") }
+            return
+        }
+
+        tracertJob = viewModelScope.launch {
+            val alivePeers = _uiState.value.peers.filter { it.isAlive() }
+            if (alivePeers.isEmpty()) {
+                _uiState.update { it.copy(statusMessage = "No alive peers for tracert") }
+                return@launch
+            }
+
+            _uiState.update { it.copy(
+                isTracertRunning = true,
+                tracertProgress = 0,
+                statusMessage = "Tracert: 0/${alivePeers.size}"
+            )}
+
+            logger.appendLogSync("INFO", "Starting tracert for ${alivePeers.size} alive peers")
+
+            val updatedPeers = _uiState.value.peers.toMutableList()
+            var completed = 0
+
+            withContext(Dispatchers.IO) {
+                alivePeers.forEachIndexed { index, peer ->
+                    if (!_uiState.value.isTracertRunning) return@forEachIndexed
+
+                    // Извлекаем hostname из адреса
+                    val host = extractHostFromAddress(peer.address)
+                    if (host.isNotEmpty()) {
+                        val hops = TracertUtil.getHopsFast(host)
+                        val peerIndex = updatedPeers.indexOfFirst { it.normalizedKey == peer.normalizedKey }
+                        if (peerIndex >= 0 && hops > 0) {
+                            updatedPeers[peerIndex] = updatedPeers[peerIndex].copy(hops = hops)
+                            logger.appendLogSync("DEBUG", "Tracert $host: $hops hops")
+                        }
+                    }
+
+                    completed = index + 1
+                    _uiState.update { it.copy(
+                        tracertProgress = completed,
+                        statusMessage = "Tracert: $completed/${alivePeers.size}",
+                        peers = updatedPeers.toList()
+                    )}
+                }
+            }
+
+            _uiState.update { it.copy(
+                isTracertRunning = false,
+                statusMessage = "Tracert completed: $completed peers",
+                peers = updatedPeers.toList()
+            )}
+            logger.appendLogSync("INFO", "Tracert completed for $completed peers")
+        }
+    }
+
+    // Извлечение hostname (делегируем UrlParser)
+    private fun extractHostFromAddress(address: String): String {
+        return UrlParser.extractHostname(address) ?: ""
+    }
+
+    // === ГРУППИРОВКА ХОСТОВ ===
+
+    /**
+     * Группировка хостов по hostname
+     */
+    fun buildGroupedHosts(hosts: List<Host>): List<GroupedHost> {
+        // Группируем по groupingKey (hostname без www)
+        val groups = hosts.groupBy { host ->
+            UrlParser.parse(host.hostString)?.groupingKey ?: host.address.lowercase()
+        }
+
+        return groups.map { (groupKey, hostList) ->
+            buildSingleGroup(groupKey, hostList)
+        }.sortedWith(
+            compareByDescending<GroupedHost> { it.isAlive }
+                .thenBy { it.getBestResultMs() }  // Сортировка по лучшему результату (меньше = лучше)
+        )
+    }
+
+    private fun buildSingleGroup(groupKey: String, hosts: List<Host>): GroupedHost {
+        val firstHost = hosts.first()
+
+        // Собираем адреса (hst + dns ip1/2/3)
+        val addresses = mutableListOf<HostAddress>()
+        addresses.add(HostAddress(
+            address = firstHost.address,
+            type = AddressType.HST
+        ))
+
+        // DNS IP адреса (уникальные)
+        val dnsIps = hosts.flatMap { host ->
+            listOfNotNull(host.dnsIp1, host.dnsIp2, host.dnsIp3)
+        }.distinct().filter { it != firstHost.address }
+
+        dnsIps.forEachIndexed { index, ip ->
+            val type = when (index) {
+                0 -> AddressType.IP1
+                1 -> AddressType.IP2
+                else -> AddressType.IP3
+            }
+            if (index < 3) {
+                addresses.add(HostAddress(address = ip, type = type))
+            }
+        }
+
+        // Собираем endpoints (уникальные protocol:port)
+        val endpoints = hosts.map { host ->
+            val parsed = UrlParser.parse(host.hostString)
+            HostEndpoint(
+                protocol = parsed?.protocol ?: host.hostType,
+                port = parsed?.port ?: host.port ?: 443,
+                originalUrl = host.hostString
+            )
+        }.distinctBy { it.key }
+
+        return GroupedHost(
+            groupKey = groupKey,
+            displayName = firstHost.address,
+            region = firstHost.region,
+            geoIp = firstHost.geoIp,
+            source = firstHost.source,
+            addresses = addresses,
+            endpoints = endpoints
+        )
+    }
+
+    /**
+     * Обновление групп с результатами проверок
+     */
+    fun updateGroupsWithResults() {
+        val hostResults = _uiState.value.hostResults
+
+        // Получаем хосты из БД для группировки
+        viewModelScope.launch(Dispatchers.IO) {
+            val dbHosts = database.hostDao().getAllHostsList()
+            val groups = buildGroupedHosts(dbHosts)
+
+            // Обновляем результаты в группах
+            val updatedGroups = groups.map { group ->
+                updateGroupWithResults(group, hostResults)
+            }
+
+            withContext(Dispatchers.Main) {
+                _uiState.update { it.copy(groupedHosts = updatedGroups) }
+            }
+        }
+    }
+
+    private fun updateGroupWithResults(
+        group: GroupedHost,
+        hostResults: Map<String, List<HostCheckResult>>
+    ): GroupedHost {
+        // Находим результаты для этой группы
+        val matchingResults = hostResults.filterKeys { hostString ->
+            val parsed = UrlParser.parse(hostString)
+            parsed?.groupingKey == group.groupKey
+        }.values.flatten()
+
+        if (matchingResults.isEmpty()) return group
+
+        // Обновляем адреса с результатами общих проверок
+        val updatedAddresses = group.addresses.map { addr ->
+            val result = matchingResults.find { it.target == addr.address || it.target.contains(addr.address) }
+            if (result != null) {
+                addr.copy(
+                    pingResult = result.pingTime,
+                    port80Result = result.port80,
+                    port443Result = result.port443
+                )
+            } else addr
+        }
+
+        // Обновляем endpoints с результатами специфичных проверок
+        val updatedEndpoints = group.endpoints.map { endpoint ->
+            val checkResults = group.addresses.mapNotNull { addr ->
+                val result = matchingResults.find {
+                    it.target == addr.address || it.target.contains(addr.address)
+                }
+                if (result != null) {
+                    val fullUrl = UrlParser.replaceHost(endpoint.originalUrl, addr.address)
+                    EndpointCheckResult(
+                        addressType = addr.type,
+                        address = addr.address,
+                        yggRttMs = result.yggRtt,
+                        portDefaultMs = result.portDefault,
+                        fullUrl = fullUrl
+                    )
+                } else null
+            }
+            endpoint.copy(checkResults = checkResults)
+        }
+
+        return group.copy(
+            addresses = updatedAddresses,
+            endpoints = updatedEndpoints
+        )
+    }
+
+    /**
+     * Toggle выбора endpoint
+     */
+    fun toggleEndpointSelection(fullUrl: String) {
+        _uiState.update { state ->
+            val newSelection = if (state.selectedEndpoints.contains(fullUrl)) {
+                state.selectedEndpoints - fullUrl
+            } else {
+                state.selectedEndpoints + fullUrl
+            }
+            state.copy(selectedEndpoints = newSelection)
+        }
+    }
+
+    /**
+     * Выбор/снятие выбора списка endpoints (для Select All)
+     */
+    fun selectAllEndpoints(urls: List<String>) {
+        _uiState.update { state ->
+            // Если все уже выбраны - снимаем выбор, иначе добавляем все
+            val allSelected = urls.all { it in state.selectedEndpoints }
+            val newSelection = if (allSelected) {
+                state.selectedEndpoints - urls.toSet()
+            } else {
+                state.selectedEndpoints + urls.toSet()
+            }
+            state.copy(selectedEndpoints = newSelection)
+        }
+    }
+
+    /**
+     * Получение выбранных URL для копирования (из групп)
+     */
+    fun getSelectedEndpointUrls(): List<String> {
+        return _uiState.value.selectedEndpoints.toList()
+    }
+
+    /**
+     * Очистка выбора endpoints
+     */
+    fun clearEndpointSelection() {
+        _uiState.update { it.copy(selectedEndpoints = emptySet()) }
+    }
 
     override fun onCleared() {
         super.onCleared()

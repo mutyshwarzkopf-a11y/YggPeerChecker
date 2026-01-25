@@ -115,7 +115,14 @@ fun ViewTab(
             .fillMaxSize()
             .padding(horizontal = 12.dp)
     ) {
-        // Первая строка - кнопки действий
+        // Первая строка - кнопки действий (порядок: Fill DNS, Fill GeoIP, Clear DNS&GEO, Delete)
+        // Вычисляем переменные для всех кнопок заранее
+        // GeoIP теперь может резолвить hostname на лету, поэтому включаем все без geoIp
+        val allHostsNeedingGeoIp = uiState.hosts.filter { host ->
+            host.geoIp.isNullOrEmpty()
+        }
+        val hostsWithDnsOrGeo = filteredHosts.filter { it.dnsIp1 != null || !it.geoIp.isNullOrEmpty() }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -123,7 +130,7 @@ fun ViewTab(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Fill DNS - с возможностью отмены
+            // 1. Fill DNS - с возможностью отмены
             OutlinedButton(
                 onClick = { viewModel.fillDnsIps() },
                 enabled = uiState.isDnsLoading || (!uiState.isLoading && uiState.totalCount > 0),
@@ -136,7 +143,6 @@ fun ViewTab(
                 }
             ) {
                 if (uiState.isDnsLoading) {
-                    // Показываем крестик при активной операции
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Cancel",
@@ -151,43 +157,15 @@ fun ViewTab(
                     )
                 }
                 Spacer(modifier = Modifier.width(4.dp))
-                Text(if (uiState.isDnsLoading) "Cancel" else "Fill DNS", fontSize = 11.sp)
+                Text(if (uiState.isDnsLoading) "Cancel" else "DNS", fontSize = 11.sp)
             }
 
-            // Clear DNS & GeoIP - по активному фильтру (оранжевая кнопка)
-            val hostsWithDnsOrGeo = filteredHosts.filter { it.dnsIp1 != null || it.geoIp != null }
-            OutlinedButton(
-                onClick = { 
-                    val ids = hostsWithDnsOrGeo.map { it.id }
-                    viewModel.clearDnsAndGeoIpByIds(ids)
-                },
-                enabled = !uiState.isLoading && hostsWithDnsOrGeo.isNotEmpty(),
-                modifier = Modifier.height(32.dp),
-                contentPadding = PaddingValues(horizontal = 10.dp),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = MaterialTheme.colorScheme.tertiary // оранжевый/предупреждение
-                )
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Clear,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Clr (${hostsWithDnsOrGeo.size})", fontSize = 11.sp)
-            }
-
-            // Fill GeoIP - счетчик показывает ВСЕ хосты без GeoIP, не только видимые
-            val allHostsNeedingGeoIp = uiState.hosts.filter { host ->
-                host.geoIp == null && (host.dnsIp1 != null || isIpOnly(host))
-            }
+            // 2. Fill GeoIP - счетчик показывает ВСЕ хосты без GeoIP
             OutlinedButton(
                 onClick = {
-                    // Если уже выполняется - viewModel сам отменит при повторном нажатии
                     if (uiState.isGeoIpLoading) {
-                        viewModel.fillGeoIp(null) // Вызов отменит текущую операцию
+                        viewModel.fillGeoIp(null)
                     } else {
-                        // Заполняем GeoIP для всех хостов без него
                         val ids = allHostsNeedingGeoIp.map { it.id }
                         viewModel.fillGeoIp(ids)
                     }
@@ -202,7 +180,6 @@ fun ViewTab(
                 }
             ) {
                 if (uiState.isGeoIpLoading) {
-                    // Показываем крестик при активной операции
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Cancel",
@@ -218,31 +195,52 @@ fun ViewTab(
                 }
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    if (uiState.isGeoIpLoading) "Cancel" else "GeoIP (${allHostsNeedingGeoIp.size})",
+                    if (uiState.isGeoIpLoading) "Cancel" else "Geo (${allHostsNeedingGeoIp.size})",
                     fontSize = 11.sp
                 )
             }
 
-            // Clear Visible
+            // 3. Clear DNS & GeoIP - оранжевая кнопка
             OutlinedButton(
-                onClick = { 
-                    val ids = filteredHosts.map { it.id }
-                    viewModel.clearVisibleHosts(ids)
+                onClick = {
+                    val ids = hostsWithDnsOrGeo.map { it.id }
+                    viewModel.clearDnsAndGeoIpByIds(ids)
                 },
-                enabled = !uiState.isLoading && filteredHosts.isNotEmpty(),
+                enabled = !uiState.isLoading && hostsWithDnsOrGeo.isNotEmpty(),
                 modifier = Modifier.height(32.dp),
                 contentPadding = PaddingValues(horizontal = 10.dp),
                 colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = MaterialTheme.colorScheme.error
+                    contentColor = MaterialTheme.colorScheme.tertiary
                 )
             ) {
                 Icon(
-                    imageVector = Icons.Default.Delete,
+                    imageVector = Icons.Default.Clear,
                     contentDescription = null,
                     modifier = Modifier.size(14.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("Clear (${filteredHosts.size})", fontSize = 11.sp)
+                Text("Clr (${hostsWithDnsOrGeo.size})", fontSize = 11.sp)
+            }
+
+            // 4. Clear Visible - только красная иконка урны
+            IconButton(
+                onClick = {
+                    val ids = filteredHosts.map { it.id }
+                    viewModel.clearVisibleHosts(ids)
+                },
+                enabled = !uiState.isLoading && filteredHosts.isNotEmpty(),
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "Delete visible (${filteredHosts.size})",
+                    modifier = Modifier.size(20.dp),
+                    tint = if (!uiState.isLoading && filteredHosts.isNotEmpty()) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    }
+                )
             }
         }
 
@@ -387,23 +385,28 @@ private fun isIpv4Host(host: Host): Boolean {
 
 // Проверка на чистый IP (без DNS имени) - IPv4 или IPv6
 private fun isIpOnly(host: Host): Boolean {
+    // Убираем порт из address если есть (example.com:443 -> example.com)
+    val cleanAddress = host.address.substringBefore(":")
+
+    // IPv4 проверка
     val ipv4Regex = Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$""")
-    // IPv4 в address
-    if (ipv4Regex.matches(host.address)) return true
-    
-    // IPv6 в address (содержит двоеточия, но не как часть URL схемы)
-    if (host.address.contains(":") && !host.address.contains("://")) return true
-    
+    if (ipv4Regex.matches(cleanAddress)) return true
+
+    // IPv6 проверка - должно быть минимум 2 двоеточия (например 2001:db8::1)
+    // Также IPv6 может быть в скобках [2001:db8::1]
+    val ipv6Regex = Regex("""^[0-9a-fA-F:]+$""")
+    if (host.address.count { it == ':' } >= 2 && ipv6Regex.matches(host.address)) return true
+
     // IPv6 в квадратных скобках в hostString (например [2001:db8::1]:port)
     val bracketMatch = Regex("\\[([^\\]]+)\\]").find(host.hostString)
     if (bracketMatch != null) {
         val inBrackets = bracketMatch.groupValues[1]
-        // IPv6 литерал в скобках
-        if (inBrackets.contains(":")) return true
+        // IPv6 литерал в скобках (минимум 2 двоеточия)
+        if (inBrackets.count { it == ':' } >= 2) return true
         // IPv4 литерал в скобках (редко)
         if (ipv4Regex.matches(inBrackets)) return true
     }
-    
+
     return false
 }
 
@@ -424,7 +427,7 @@ private fun HostItem(host: Host) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Левая часть: тип + регион + GeoIP CC:City
+                // Левая часть: тип + TLD + регион + GeoIP CC:City
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -439,6 +442,14 @@ private fun HostItem(host: Host) {
                             else -> MaterialTheme.colorScheme.secondary
                         }
                     )
+                    // TLD (домен первого уровня: .com, .org, .ru)
+                    extractTld(host.address)?.let { tld ->
+                        Text(
+                            text = tld,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
                     // Регион из ygg списков (например Armenia)
                     host.region?.let { region ->
                         Text(
@@ -448,7 +459,7 @@ private fun HostItem(host: Host) {
                         )
                     }
                     // GeoIP CC:City (например US:Washington)
-                    host.geoIp?.let { geo ->
+                    host.geoIp?.takeIf { it.isNotEmpty() }?.let { geo ->
                         Text(
                             text = geo,
                             style = MaterialTheme.typography.labelSmall,
@@ -463,7 +474,7 @@ private fun HostItem(host: Host) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Иконка GeoIP (если заполнено)
-                    if (host.geoIp != null) {
+                    if (!host.geoIp.isNullOrEmpty()) {
                         Icon(
                             imageVector = Icons.Default.Public,
                             contentDescription = "GeoIP resolved",
@@ -561,10 +572,37 @@ private fun formatSource(source: String): String {
     return when {
         source.contains("neilalexander") -> "ygg:neil"
         source.contains("yggdrasil.link") -> "ygg:link"
+        source.contains("miniwhite") -> "miniwhite"
+        source.contains("miniblack") -> "miniblack"
+        source.contains("zieng2") || source.contains("vless") -> "vless:zieng"
         source.contains("whitelist") -> "whitelist"
         source == "clipboard" -> "clipboard"
         source == "file" -> "file"
         source.startsWith("file:") -> source.substringAfter("file:").take(15)
         else -> source.take(15)
     }
+}
+
+// Извлечение TLD (домен первого уровня) из адреса
+private fun extractTld(address: String): String? {
+    // Пропускаем IP адреса
+    val ipv4Regex = Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$""")
+    if (ipv4Regex.matches(address)) return null
+    if (address.contains(":") && !address.contains(".")) return null // IPv6 без домена
+
+    // Извлекаем домен из адреса
+    val domain = address
+        .substringBefore(":")  // убираем порт
+        .substringBefore("/")  // убираем путь
+        .trim()
+
+    // Ищем TLD (последнюю часть после точки)
+    val parts = domain.split(".")
+    if (parts.size < 2) return null
+
+    val tld = parts.last().lowercase()
+    // Фильтруем невалидные TLD (слишком длинные или пустые)
+    if (tld.isEmpty() || tld.length > 10) return null
+
+    return ".$tld"
 }

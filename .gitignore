@@ -16,6 +16,12 @@ mike.md
 schema.md
 plan.md
 yggpeers_complete*.md
+qwen*
+CLAU*
+clau*
+.cla*
+.qwe*
+
 
 # Debug logs
 adb_logcat/

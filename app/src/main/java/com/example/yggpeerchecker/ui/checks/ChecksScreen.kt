@@ -9,12 +9,14 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -24,12 +26,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckBox
+import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.ViewList
+import androidx.compose.material.icons.filled.ViewModule
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -69,6 +76,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.yggpeerchecker.data.DiscoveredPeer
+import com.example.yggpeerchecker.data.GroupedHost
 import com.example.yggpeerchecker.data.SessionManager
 import com.example.yggpeerchecker.ui.theme.OnlineGreen
 import com.example.yggpeerchecker.utils.PersistentLogger
@@ -90,10 +98,18 @@ fun ChecksScreen(
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
     var showSessionsDialog by remember { mutableStateOf(false) }
+    var useGroupedView by remember { mutableStateOf(false) }  // Переключатель вида: группы/плоский список
     val scope = rememberCoroutineScope()
 
+    // Обновляем группы когда поиск завершён
+    LaunchedEffect(uiState.isSearching) {
+        if (!uiState.isSearching && uiState.peers.isNotEmpty()) {
+            viewModel.updateGroupsWithResults()
+        }
+    }
+
     // Применяем фильтры и сортировки к списку результатов
-    val filteredPeers = remember(uiState.peers, uiState.typeFilter, uiState.sortType, uiState.filterMs) {
+    val filteredPeers = remember(uiState.peers, uiState.typeFilter, uiState.sourceFilter, uiState.sortType, uiState.filterMs) {
         var result = uiState.peers
 
         // Фильтр по типу (для отображения)
@@ -102,9 +118,18 @@ fun ChecksScreen(
                 peer.protocol.lowercase() in listOf("tcp", "tls", "quic", "ws", "wss")
             }
             "SNI" -> result.filter { peer ->
-                peer.protocol.lowercase() in listOf("sni", "http", "https")
+                // SNI включает все не-Ygg типы: sni, http, https, vless, vmess
+                peer.protocol.lowercase() in listOf("sni", "http", "https", "vless", "vmess")
+            }
+            "Vless" -> result.filter { peer ->
+                peer.protocol.lowercase() in listOf("vless", "vmess")
             }
             else -> result
+        }
+
+        // Фильтр по источнику
+        if (uiState.sourceFilter != "All") {
+            result = result.filter { peer -> peer.sourceShort == uiState.sourceFilter }
         }
 
         // Фильтр по ms (если включен)
@@ -145,6 +170,38 @@ fun ChecksScreen(
         result
     }
 
+    // Фильтрованный список групп для grouped view
+    val filteredGroupedHosts = remember(uiState.groupedHosts, uiState.typeFilter, uiState.sourceFilter) {
+        var result = uiState.groupedHosts
+
+        // Фильтр по источнику
+        if (uiState.sourceFilter != "All") {
+            result = result.filter { group -> group.shortSource() == uiState.sourceFilter }
+        }
+
+        // Фильтр по типу
+        result = when (uiState.typeFilter) {
+            "Ygg" -> result.filter { group ->
+                group.endpoints.any { ep ->
+                    ep.protocol.lowercase() in listOf("tcp", "tls", "quic", "ws", "wss")
+                }
+            }
+            "SNI" -> result.filter { group ->
+                group.endpoints.any { ep ->
+                    ep.protocol.lowercase() in listOf("sni", "http", "https", "vless", "vmess")
+                }
+            }
+            "Vless" -> result.filter { group ->
+                group.endpoints.any { ep ->
+                    ep.protocol.lowercase() in listOf("vless", "vmess")
+                }
+            }
+            else -> result
+        }
+
+        result
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -177,6 +234,37 @@ fun ChecksScreen(
                     isSelected = uiState.typeFilter == "SNI",
                     onClick = { viewModel.setTypeFilter("SNI") }
                 )
+                StatChip(
+                    label = "Vless",
+                    count = uiState.dbVlessCount,
+                    isSelected = uiState.typeFilter == "Vless",
+                    onClick = { viewModel.setTypeFilter("Vless") }
+                )
+            }
+        }
+
+        // Динамический фильтр по источникам (из БД)
+        if (uiState.availableSources.isNotEmpty()) {
+            LazyRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                item {
+                    SourceFilterChip(
+                        label = "All",
+                        count = uiState.dbHostsCount,
+                        isSelected = uiState.sourceFilter == "All",
+                        onClick = { viewModel.setSourceFilter("All") }
+                    )
+                }
+                items(uiState.availableSources) { source ->
+                    SourceFilterChip(
+                        label = source.shortName,
+                        count = source.count,
+                        isSelected = uiState.sourceFilter == source.shortName,
+                        onClick = { viewModel.setSourceFilter(source.shortName) }
+                    )
+                }
             }
         }
 
@@ -207,13 +295,8 @@ fun ChecksScreen(
             ) {
                 Icon(
                     imageVector = if (uiState.isSearching) Icons.Default.Stop else Icons.Default.Search,
-                    contentDescription = null,
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    if (uiState.isSearching) "STOP" else "FIND",
-                    fontSize = 16.sp
+                    contentDescription = if (uiState.isSearching) "Stop" else "Find",
+                    modifier = Modifier.size(28.dp)
                 )
             }
 
@@ -239,6 +322,18 @@ fun ChecksScreen(
                 modifier = Modifier.size(50.dp)
             ) {
                 Icon(Icons.Default.Save, contentDescription = "Sessions", modifier = Modifier.size(24.dp))
+            }
+
+            // View toggle icon (grouped/flat)
+            IconButton(
+                onClick = { useGroupedView = !useGroupedView },
+                modifier = Modifier.size(50.dp)
+            ) {
+                Icon(
+                    imageVector = if (useGroupedView) Icons.Default.ViewList else Icons.Default.ViewModule,
+                    contentDescription = if (useGroupedView) "Flat view" else "Grouped view",
+                    modifier = Modifier.size(24.dp)
+                )
             }
         }
 
@@ -308,6 +403,18 @@ fun ChecksScreen(
                             Switch(
                                 checked = uiState.alwaysCheckDnsIps,
                                 onCheckedChange = { viewModel.toggleAlwaysCheckDnsIps() }
+                            )
+                        }
+
+                        // Tracert кнопка
+                        Button(
+                            onClick = { viewModel.runTracert() },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !uiState.isSearching
+                        ) {
+                            Text(
+                                if (uiState.isTracertRunning) "Stop Tracert (${uiState.tracertProgress})"
+                                else "Run Tracert (alive hosts)"
                             )
                         }
                     }
@@ -554,60 +661,121 @@ fun ChecksScreen(
             overflow = TextOverflow.Ellipsis
         )
 
-        // Peer list
+        // Peer list - grouped или flat
         LazyColumn(
             modifier = Modifier.weight(1f)
         ) {
-            items(
-                items = filteredPeers,
-                key = { it.address }
-            ) { peer ->
-                val fallbackResults = viewModel.getHostFallbackResults(peer.address)
-                PeerListItem(
-                    peer = peer,
-                    fallbackResults = fallbackResults,
-                    isSelected = uiState.selectedPeers.contains(peer.address),
-                    onToggleSelection = { viewModel.togglePeerSelection(peer.address) },
-                    selectedFallbacks = uiState.selectedFallbacks,
-                    onToggleFallbackSelection = { viewModel.toggleFallbackSelection(it) }
-                )
+            if (useGroupedView && filteredGroupedHosts.isNotEmpty()) {
+                // Grouped view
+                items(
+                    items = filteredGroupedHosts,
+                    key = { it.groupKey }
+                ) { group ->
+                    GroupedHostCard(
+                        group = group,
+                        selectedEndpoints = uiState.selectedEndpoints,
+                        onToggleEndpoint = { viewModel.toggleEndpointSelection(it) },
+                        onSelectAllAlive = { urls -> viewModel.selectAllEndpoints(urls) }
+                    )
+                }
+            } else {
+                // Flat view (legacy)
+                items(
+                    items = filteredPeers,
+                    key = { it.address }
+                ) { peer ->
+                    val fallbackResults = viewModel.getHostFallbackResults(peer.address)
+                    PeerListItem(
+                        peer = peer,
+                        fallbackResults = fallbackResults,
+                        isSelected = uiState.selectedPeers.contains(peer.address),
+                        onToggleSelection = { viewModel.togglePeerSelection(peer.address) },
+                        selectedFallbacks = uiState.selectedFallbacks,
+                        onToggleFallbackSelection = { viewModel.toggleFallbackSelection(it) }
+                    )
+                }
             }
         }
 
-        // Bottom actions
-        if (filteredPeers.isNotEmpty()) {
+        // Bottom actions - разные для grouped и flat режимов
+        val hasContent = if (useGroupedView) uiState.groupedHosts.isNotEmpty() else filteredPeers.isNotEmpty()
+
+        if (hasContent) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 IconButton(
-                    onClick = { viewModel.clearPeersList() },
+                    onClick = {
+                        viewModel.clearPeersList()
+                        viewModel.clearEndpointSelection()
+                    },
                     modifier = Modifier.size(40.dp)
                 ) {
                     Icon(Icons.Default.Delete, contentDescription = "Clear")
                 }
 
-                OutlinedButton(
-                    onClick = { viewModel.toggleSelectAll() },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(if (uiState.selectedPeers.isNotEmpty()) "Deselect All" else "Select All")
-                }
+                if (useGroupedView) {
+                    // Grouped mode: работа с endpoints
+                    val hasSelection = uiState.selectedEndpoints.isNotEmpty()
+                    IconButton(
+                        onClick = { viewModel.clearEndpointSelection() },
+                        enabled = hasSelection
+                    ) {
+                        Icon(
+                            imageVector = if (hasSelection) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                            contentDescription = "Deselect All",
+                            tint = if (hasSelection) OnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
 
-                Button(
-                    onClick = {
-                        val addresses = viewModel.getSelectedAddresses()
-                        if (addresses.isNotEmpty()) {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("Yggdrasil peers", addresses.joinToString("\n")))
-                            Toast.makeText(context, "Copied ${addresses.size} peers", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(context, "No peers selected", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Copy (${uiState.selectedPeers.size})")
+                    Button(
+                        onClick = {
+                            val urls = viewModel.getSelectedEndpointUrls()
+                            if (urls.isNotEmpty()) {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Yggdrasil peers", urls.joinToString("\n")))
+                                Toast.makeText(context, "Copied ${urls.size} URLs", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "No endpoints selected", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("${uiState.selectedEndpoints.size}")
+                    }
+                } else {
+                    // Flat mode: работа с peers
+                    val hasSelection = uiState.selectedPeers.isNotEmpty()
+                    IconButton(
+                        onClick = { viewModel.toggleSelectAll() }
+                    ) {
+                        Icon(
+                            imageVector = if (hasSelection) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                            contentDescription = if (hasSelection) "Deselect All" else "Select All",
+                            tint = if (hasSelection) OnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            val addresses = viewModel.getSelectedAddresses()
+                            if (addresses.isNotEmpty()) {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Yggdrasil peers", addresses.joinToString("\n")))
+                                Toast.makeText(context, "Copied ${addresses.size} peers", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "No peers selected", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("${uiState.selectedPeers.size}")
+                    }
                 }
             }
         }
@@ -654,6 +822,47 @@ private fun StatChip(
     }
 }
 
+// Чип для фильтра по источнику (горизонтальный, компактный)
+@Composable
+private fun SourceFilterChip(
+    label: String,
+    count: Int,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    val backgroundColor = if (isSelected)
+        MaterialTheme.colorScheme.secondaryContainer
+    else
+        MaterialTheme.colorScheme.surfaceVariant
+    val textColor = if (isSelected)
+        MaterialTheme.colorScheme.onSecondaryContainer
+    else
+        MaterialTheme.colorScheme.onSurfaceVariant
+
+    Card(
+        modifier = Modifier.clickable { onClick() },
+        colors = CardDefaults.cardColors(containerColor = backgroundColor)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = textColor
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = "($count)",
+                style = MaterialTheme.typography.labelSmall,
+                color = textColor.copy(alpha = 0.6f),
+                fontSize = 10.sp
+            )
+        }
+    }
+}
+
 @Composable
 fun PeerListItem(
     peer: DiscoveredPeer,
@@ -689,6 +898,7 @@ fun PeerListItem(
                 portDefaultMs = peer.portDefaultMs,
                 port80Ms = peer.port80Ms,
                 port443Ms = peer.port443Ms,
+                hops = peer.hops,
                 isSelected = isSelected,
                 onToggleSelection = onToggleSelection,
                 errorReason = if (!peer.isAlive()) peer.getErrorReason() else null
@@ -743,6 +953,7 @@ private fun PeerEntryRow(
     portDefaultMs: Long,
     port80Ms: Long,
     port443Ms: Long,
+    hops: Int = -1,
     isSelected: Boolean,
     onToggleSelection: () -> Unit,
     errorReason: String? = null,
@@ -824,6 +1035,14 @@ private fun PeerEntryRow(
             CheckResultChip("Pdef", portDefaultMs)
             CheckResultChip("P80", port80Ms)
             CheckResultChip("P443", port443Ms)
+            // Hops (если есть)
+            if (hops > 0) {
+                Text(
+                    text = "Hops:$hops",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+            }
         }
         
         // Ошибка (если есть и хост мертв)

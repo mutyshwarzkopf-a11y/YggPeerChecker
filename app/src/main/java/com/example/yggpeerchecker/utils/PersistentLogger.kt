@@ -8,10 +8,11 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 class PersistentLogger(private val context: Context) {
-    // Два режима: OFF - выключено, ALL - пишет всё
+    // Три режима: OFF - выключено, ERROR - только ошибки, ALL - пишет всё
     enum class LogLevel {
-        OFF,   // Выключено
-        ALL    // Пишет всё
+        OFF,    // Выключено
+        ERROR,  // Только ошибки
+        ALL     // Пишет всё
     }
 
     private val logFilePath: File
@@ -52,8 +53,18 @@ class PersistentLogger(private val context: Context) {
     @Synchronized
     fun appendLogSync(level: String, message: String) {
         try {
-            // OFF = не пишем, ALL = пишем всё
-            if (minLogLevel == LogLevel.OFF) return
+            // Перечитываем уровень с диска для синхронизации между экземплярами
+            val currentLevel = loadLogLevel()
+
+            // OFF = не пишем ничего
+            if (currentLevel == LogLevel.OFF) return
+
+            // ERROR = пишем только ERROR и WARN
+            if (currentLevel == LogLevel.ERROR) {
+                val upperLevel = level.uppercase()
+                if (upperLevel != "ERROR" && upperLevel != "WARN") return
+            }
+            // ALL = пишем всё
 
             val timestamp = dateFormat.format(Date())
             val logEntry = "[$timestamp] [$level] $message\n"
@@ -71,6 +82,13 @@ class PersistentLogger(private val context: Context) {
     suspend fun appendLog(message: String) = withContext(Dispatchers.IO) {
         appendLogSync("INFO", message)
     }
+
+    // Удобные методы для разных уровней
+    fun debug(message: String) = appendLogSync("DEBUG", message)
+    fun info(message: String) = appendLogSync("INFO", message)
+    fun warn(message: String) = appendLogSync("WARN", message)
+    fun error(message: String) = appendLogSync("ERROR", message)
+    fun error(message: String, e: Throwable) = appendLogSync("ERROR", "$message: ${e.message}")
 
     suspend fun readLogs(): List<String> = withContext(Dispatchers.IO) {
         try {

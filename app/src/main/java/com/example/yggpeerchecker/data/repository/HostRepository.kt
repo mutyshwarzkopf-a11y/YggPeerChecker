@@ -6,8 +6,14 @@ import com.example.yggpeerchecker.data.database.CheckResult
 import com.example.yggpeerchecker.data.database.DnsCache
 import com.example.yggpeerchecker.data.database.Host
 import com.example.yggpeerchecker.utils.PersistentLogger
+import com.example.yggpeerchecker.utils.UrlParser
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -16,7 +22,7 @@ import java.net.InetAddress
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
-class HostRepository(context: Context, private val logger: PersistentLogger) {
+class HostRepository(private val context: Context, private val logger: PersistentLogger) {
     private val database = AppDatabase.getDatabase(context)
     private val hostDao = database.hostDao()
     private val checkResultDao = database.checkResultDao()
@@ -27,16 +33,22 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    // Получение concurrent_streams из SharedPreferences (config_prefs)
+    private fun getConcurrentStreams(): Int {
+        val prefs = context.getSharedPreferences("config_prefs", Context.MODE_PRIVATE)
+        return prefs.getInt("concurrent_streams", 10)
+    }
+
     companion object {
         // Источники Ygg пиров
         const val SOURCE_NEILALEXANDER = "https://publicpeers.neilalexander.dev/publicnodes.json"
         const val SOURCE_YGGDRASIL_LINK = "https://peers.yggdrasil.link/publicnodes.json"
         // Источники whitelist
         const val SOURCE_RU_WHITELIST = "https://github.com/hxehex/russia-mobile-internet-whitelist/raw/refs/heads/main/whitelist.txt"
-        const val SOURCE_MINI_WHITE = "https://raw.githubusercontent.com/mutyshwarzkopf-a11y/YggPeerChecker/main/miniwhite.txt"
-        const val SOURCE_MINI_BLACK = "https://raw.githubusercontent.com/mutyshwarzkopf-a11y/YggPeerChecker/main/miniblack.txt"
+        const val SOURCE_MINI_WHITE = "https://github.com/mutyshwarzkopf-a11y/YggPeerChecker/raw/refs/heads/main/lists/miniwhite.txt"
+        const val SOURCE_MINI_BLACK = "https://github.com/mutyshwarzkopf-a11y/YggPeerChecker/raw/refs/heads/main/lists/miniblack.txt"
         // Источники vless
-        const val SOURCE_VLESS_SUB = "https://raw.githubusercontent.com/yebekhe/TVC/main/subscriptions/xray/normal/vless"
+        const val SOURCE_VLESS_SUB = "https://raw.githubusercontent.com/Zieng2/wl/refs/heads/main/vless_lite.txt"
     }
 
     // Flow для наблюдения за списком хостов
@@ -44,6 +56,7 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
     fun getHostsCountFlow(): Flow<Int> = hostDao.getHostsCount()
     fun getYggHostsCountFlow(): Flow<Int> = hostDao.getYggHostsCount()
     fun getSniHostsCountFlow(): Flow<Int> = hostDao.getSniHostsCount()
+    fun getVlessHostsCountFlow(): Flow<Int> = hostDao.getVlessHostsCount()
     fun getResolvedCountFlow(): Flow<Int> = hostDao.getResolvedHostsCount()
 
     // Получение хостов
@@ -64,7 +77,8 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
     }
 
     // Загрузка Ygg пиров из JSON
-    suspend fun loadYggPeers(sourceUrl: String, onProgress: (String) -> Unit): Result<Int> = withContext(Dispatchers.IO) {
+    // Возвращает Pair(actuallyAdded, skipped)
+    suspend fun loadYggPeers(sourceUrl: String, onProgress: (String) -> Unit): Result<Pair<Int, Int>> = withContext(Dispatchers.IO) {
         try {
             onProgress("Connecting to $sourceUrl...")
             logger.appendLogSync("INFO", "Loading Ygg peers from: $sourceUrl")
@@ -111,43 +125,45 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
             }
 
             onProgress("Saving ${hosts.size} peers...")
+            val countBefore = hostDao.getHostCount()
             hostDao.insertAll(hosts)
-            logger.appendLogSync("INFO", "Loaded ${hosts.size} peers from $sourceUrl")
+            val countAfter = hostDao.getHostCount()
+            val actuallyAdded = countAfter - countBefore
+            val skipped = hosts.size - actuallyAdded
+            logger.appendLogSync("INFO", "Loaded ${hosts.size} peers from $sourceUrl (new: $actuallyAdded, skip: $skipped)")
 
-            Result.success(hosts.size)
+            Result.success(Pair(actuallyAdded, skipped))
         } catch (e: Exception) {
             logger.appendLogSync("ERROR", "Failed to load Ygg peers: ${e.message}")
             Result.failure(e)
         }
     }
 
-    // Парсинг URL Ygg пира
+    // Парсинг URL Ygg пира (использует UrlParser)
     private fun parseYggPeerUrl(peerUrl: String, source: String, timestamp: Long, region: String? = null): Host? {
-        // Формат: protocol://[ip]:port или protocol://host:port
-        val regex = Regex("^(tcp|tls|quic|ws|wss)://\\[?([^\\]/:]+)\\]?:(\\d+)(.*)?$")
-        val match = regex.find(peerUrl) ?: return null
+        val parsed = UrlParser.parse(peerUrl) ?: return null
 
-        val protocol = match.groupValues[1]
-        val address = match.groupValues[2]
-        val port = match.groupValues[3].toIntOrNull() ?: return null
+        // Проверяем что это Ygg протокол
+        if (!UrlParser.isYggProtocol(parsed.protocol)) return null
 
-        val id = generateHostId(peerUrl)
+        val id = generateHostId(peerUrl.lowercase())
 
         return Host(
             id = id,
             source = source,
             dateAdded = timestamp,
-            hostType = protocol,
-            hostString = peerUrl,
-            address = address,
-            port = port,
-            region = region,  // Сохраняем регион из JSON
-            dnsIp1 = null  // Не заполняем dns_ip для IP адресов, они не нуждаются в резолвинге
+            hostType = parsed.protocol,
+            hostString = peerUrl.lowercase(),
+            address = parsed.hostname,
+            port = parsed.port,
+            region = region,
+            dnsIp1 = null
         )
     }
 
     // Загрузка whitelist
-    suspend fun loadWhitelist(onProgress: (String) -> Unit): Result<Int> = withContext(Dispatchers.IO) {
+    // Возвращает Pair(actuallyAdded, skipped)
+    suspend fun loadWhitelist(onProgress: (String) -> Unit): Result<Pair<Int, Int>> = withContext(Dispatchers.IO) {
         try {
             onProgress("Connecting to whitelist...")
             logger.appendLogSync("INFO", "Loading whitelist from: $SOURCE_RU_WHITELIST")
@@ -168,10 +184,14 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
 
             val hosts = parseHostLines(body, SOURCE_RU_WHITELIST)
             onProgress("Saving ${hosts.size} hosts...")
+            val countBefore = hostDao.getHostCount()
             hostDao.insertAll(hosts)
-            logger.appendLogSync("INFO", "Loaded ${hosts.size} hosts from whitelist")
+            val countAfter = hostDao.getHostCount()
+            val actuallyAdded = countAfter - countBefore
+            val skipped = hosts.size - actuallyAdded
+            logger.appendLogSync("INFO", "Loaded ${hosts.size} hosts from whitelist (new: $actuallyAdded, skip: $skipped)")
 
-            Result.success(hosts.size)
+            Result.success(Pair(actuallyAdded, skipped))
         } catch (e: Exception) {
             logger.appendLogSync("ERROR", "Failed to load whitelist: ${e.message}")
             Result.failure(e)
@@ -179,13 +199,18 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
     }
 
     // Загрузка из текста (буфер/файл)
-    suspend fun loadFromText(text: String, source: String): Result<Int> = withContext(Dispatchers.IO) {
+    // Возвращает Pair(actuallyAdded, skipped)
+    suspend fun loadFromText(text: String, source: String): Result<Pair<Int, Int>> = withContext(Dispatchers.IO) {
         try {
             logger.appendLogSync("INFO", "Loading hosts from text, source: $source")
             val hosts = parseHostLines(text, source)
+            val countBefore = hostDao.getHostCount()
             hostDao.insertAll(hosts)
-            logger.appendLogSync("INFO", "Loaded ${hosts.size} hosts from $source")
-            Result.success(hosts.size)
+            val countAfter = hostDao.getHostCount()
+            val actuallyAdded = countAfter - countBefore
+            val skipped = hosts.size - actuallyAdded
+            logger.appendLogSync("INFO", "Loaded ${hosts.size} hosts from $source (new: $actuallyAdded, skip: $skipped)")
+            Result.success(Pair(actuallyAdded, skipped))
         } catch (e: Exception) {
             logger.appendLogSync("ERROR", "Failed to load from text: ${e.message}")
             Result.failure(e)
@@ -214,96 +239,42 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
         return hosts
     }
 
-    // Парсинг одной строки хоста
+    // Парсинг одной строки хоста (использует UrlParser)
     private fun parseHostLine(line: String, source: String, timestamp: Long): Host? {
-        val id = generateHostId(line)
+        if (line.isBlank()) return null
 
-        // Проверка Ygg формата (tcp://, tls://, etc)
-        val yggRegex = Regex("^(tcp|tls|quic|ws|wss)://.*")
-        if (yggRegex.matches(line)) {
-            return parseYggPeerUrl(line, source, timestamp)
+        // Для vless/vmess сохраняем оригинальную строку (UUID case-sensitive)
+        val isProxy = line.lowercase().startsWith("vless://") || line.lowercase().startsWith("vmess://")
+        val originalLine = if (isProxy) line else line.lowercase().trim()
+
+        val parsed = UrlParser.parse(line) ?: run {
+            logger.appendLogSync("WARN", "Failed to parse host line: $line")
+            return null
         }
 
-        // Проверка vless:// формата (vless://UUID@host:port?params#name)
-        val vlessRegex = Regex("^vless://[^@]+@([^:/?#]+):(\\d+)")
-        val vlessMatch = vlessRegex.find(line)
-        if (vlessMatch != null) {
-            val address = vlessMatch.groupValues[1]
-            val port = vlessMatch.groupValues[2].toIntOrNull() ?: 443
-            return Host(
-                id = id,
-                source = source,
-                dateAdded = timestamp,
-                hostType = "vless",
-                hostString = line,
-                address = address,
-                port = port,
-                dnsIp1 = null
-            )
+        val id = generateHostId(parsed.originalUrl.lowercase())
+
+        // Определяем hostType
+        val hostType = when {
+            UrlParser.isYggProtocol(parsed.protocol) -> parsed.protocol
+            UrlParser.isProxyProtocol(parsed.protocol) -> parsed.protocol
+            UrlParser.isSniProtocol(parsed.protocol) -> parsed.protocol
+            else -> "sni"
         }
-
-        // Проверка vmess:// (base64 encoded JSON)
-        if (line.startsWith("vmess://")) {
-            return parseVmessUrl(line, source, timestamp, id)
-        }
-
-        // Проверка http(s):// формата
-        val httpRegex = Regex("^(https?)://([^/:]+)(?::(\\d+))?(/.*)?$")
-        val httpMatch = httpRegex.find(line)
-        if (httpMatch != null) {
-            val protocol = httpMatch.groupValues[1]
-            val address = httpMatch.groupValues[2]
-            val port = httpMatch.groupValues[3].toIntOrNull()
-                ?: if (protocol == "https") 443 else 80
-
-            return Host(
-                id = id,
-                source = source,
-                dateAdded = timestamp,
-                hostType = protocol,
-                hostString = line,
-                address = address,
-                port = port,
-                dnsIp1 = null  // Не заполняем - будет заполнено через Fill DNS
-            )
-        }
-
-        // Проверка host:port формата
-        val hostPortRegex = Regex("^([^/:]+):(\\d+)$")
-        val hostPortMatch = hostPortRegex.find(line)
-        if (hostPortMatch != null) {
-            val address = hostPortMatch.groupValues[1]
-            val port = hostPortMatch.groupValues[2].toIntOrNull() ?: return null
-
-            return Host(
-                id = id,
-                source = source,
-                dateAdded = timestamp,
-                hostType = "sni",
-                hostString = line,
-                address = address,
-                port = port,
-                dnsIp1 = null  // Не заполняем - будет заполнено через Fill DNS
-            )
-        }
-
-        // Просто адрес (IP или hostname)
-        val address = line.trim()
-        if (address.isEmpty()) return null
 
         return Host(
             id = id,
             source = source,
             dateAdded = timestamp,
-            hostType = "sni",
-            hostString = address,
-            address = address,
-            port = null,
-            dnsIp1 = null  // Не заполняем - будет заполнено через Fill DNS (для IP не нужен резолвинг)
+            hostType = hostType,
+            hostString = if (isProxy) originalLine else parsed.originalUrl.lowercase(),
+            address = parsed.hostname,
+            port = parsed.port,
+            dnsIp1 = null
         )
     }
 
-    // DNS резолвинг для всех хостов
+    // DNS резолвинг для всех хостов (параллельный с Semaphore)
     // Возвращает Pair(resolved, skipped) где skipped = уже имеющие DNS или чистые IP
     suspend fun fillDnsIps(onProgress: (Int, Int) -> Unit): Result<Pair<Int, Int>> = withContext(Dispatchers.IO) {
         try {
@@ -312,44 +283,57 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
             val hostsToResolve = hosts.filter { !isIpAddress(it.address) && it.dnsIp1 == null }
             val skipped = hosts.size - hostsToResolve.size
             val total = hostsToResolve.size
-            var resolved = 0
             val now = System.currentTimeMillis()
 
-            logger.appendLogSync("INFO", "Starting DNS resolution for $total hosts (skipped: $skipped)")
+            val concurrentStreams = getConcurrentStreams()
+            logger.appendLogSync("INFO", "Starting DNS resolution for $total hosts (skipped: $skipped, streams: $concurrentStreams)")
 
-            hostsToResolve.forEachIndexed { index, host ->
-                onProgress(index + 1, total)
+            val resolvedCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val progressCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val semaphore = Semaphore(concurrentStreams)
 
-                try {
-                    val ips = resolveDns(host.address)
-                    if (ips.isNotEmpty()) {
-                        hostDao.updateDnsIps(
-                            hostId = host.id,
-                            ip1 = ips.getOrNull(0),
-                            ip2 = ips.getOrNull(1),
-                            ip3 = ips.getOrNull(2),
-                            timestamp = now
-                        )
+            coroutineScope {
+                hostsToResolve.map { host ->
+                    async {
+                        semaphore.withPermit {
+                            try {
+                                val ips = resolveDns(host.address)
+                                if (ips.isNotEmpty()) {
+                                    hostDao.updateDnsIps(
+                                        hostId = host.id,
+                                        ip1 = ips.getOrNull(0),
+                                        ip2 = ips.getOrNull(1),
+                                        ip3 = ips.getOrNull(2),
+                                        timestamp = now
+                                    )
 
-                        // Сохраняем в DNS кэш
-                        dnsCacheDao.insert(
-                            DnsCache(
-                                hostname = host.address,
-                                ip1 = ips.getOrNull(0),
-                                ip2 = ips.getOrNull(1),
-                                ip3 = ips.getOrNull(2),
-                                cachedAt = now
-                            )
-                        )
+                                    // Сохраняем в DNS кэш
+                                    dnsCacheDao.insert(
+                                        DnsCache(
+                                            hostname = host.address,
+                                            ip1 = ips.getOrNull(0),
+                                            ip2 = ips.getOrNull(1),
+                                            ip3 = ips.getOrNull(2),
+                                            cachedAt = now
+                                        )
+                                    )
 
-                        resolved++
-                        logger.appendLogSync("DEBUG", "Resolved ${host.address}: ${ips.joinToString()}")
+                                    resolvedCount.incrementAndGet()
+                                    logger.appendLogSync("DEBUG", "Resolved ${host.address}: ${ips.joinToString()}")
+                                } else {
+                                    // DNS резолв не вернул результатов - логируем
+                                    logger.appendLogSync("WARN", "DNS empty result for ${host.address}")
+                                }
+                            } catch (e: Exception) {
+                                logger.appendLogSync("WARN", "DNS resolution failed for ${host.address}: ${e.message}")
+                            }
+                            onProgress(progressCount.incrementAndGet(), total)
+                        }
                     }
-                } catch (e: Exception) {
-                    logger.appendLogSync("WARN", "DNS resolution failed for ${host.address}: ${e.message}")
-                }
+                }.awaitAll()
             }
 
+            val resolved = resolvedCount.get()
             logger.appendLogSync("INFO", "DNS resolution completed: $resolved/$total resolved, $skipped skipped")
             Result.success(Pair(resolved, skipped))
         } catch (e: Exception) {
@@ -393,33 +377,9 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
         return checkResultDao.getLatestResultForHost(hostId)
     }
 
-    // Парсинг vmess:// URL (base64 encoded JSON)
-    private fun parseVmessUrl(line: String, source: String, timestamp: Long, id: String): Host? {
-        return try {
-            val base64Part = line.removePrefix("vmess://")
-            val decoded = android.util.Base64.decode(base64Part, android.util.Base64.DEFAULT)
-            val json = JSONObject(String(decoded))
-            val address = json.optString("add", "").ifEmpty { json.optString("host", "") }
-            val port = json.optInt("port", 443)
-            if (address.isEmpty()) return null
-            Host(
-                id = id,
-                source = source,
-                dateAdded = timestamp,
-                hostType = "vmess",
-                hostString = line,
-                address = address,
-                port = port,
-                dnsIp1 = null
-            )
-        } catch (e: Exception) {
-            logger.appendLogSync("WARN", "Failed to parse vmess: ${e.message}")
-            null
-        }
-    }
-
     // Загрузка vless/vmess списка
-    suspend fun loadVlessList(sourceUrl: String, onProgress: (String) -> Unit): Result<Int> = withContext(Dispatchers.IO) {
+    // Возвращает Pair(actuallyAdded, skipped)
+    suspend fun loadVlessList(sourceUrl: String, onProgress: (String) -> Unit): Result<Pair<Int, Int>> = withContext(Dispatchers.IO) {
         try {
             onProgress("Loading vless list...")
             logger.appendLogSync("INFO", "Loading vless from: $sourceUrl")
@@ -434,9 +394,13 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
 
             val body = response.body?.string() ?: ""
             val hosts = parseHostLines(body, sourceUrl)
+            val countBefore = hostDao.getHostCount()
             hostDao.insertAll(hosts)
-            logger.appendLogSync("INFO", "Loaded ${hosts.size} hosts from vless list")
-            Result.success(hosts.size)
+            val countAfter = hostDao.getHostCount()
+            val actuallyAdded = countAfter - countBefore
+            val skipped = hosts.size - actuallyAdded
+            logger.appendLogSync("INFO", "Loaded ${hosts.size} hosts from vless list (new: $actuallyAdded, skip: $skipped)")
+            Result.success(Pair(actuallyAdded, skipped))
         } catch (e: Exception) {
             logger.appendLogSync("ERROR", "Failed to load vless: ${e.message}")
             Result.failure(e)
@@ -444,7 +408,8 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
     }
 
     // Загрузка mini списков (google/hosts format)
-    suspend fun loadMiniList(sourceUrl: String, listName: String, onProgress: (String) -> Unit): Result<Int> = withContext(Dispatchers.IO) {
+    // Возвращает Pair(actuallyAdded, skipped)
+    suspend fun loadMiniList(sourceUrl: String, listName: String, onProgress: (String) -> Unit): Result<Pair<Int, Int>> = withContext(Dispatchers.IO) {
         try {
             onProgress("Loading $listName...")
             logger.appendLogSync("INFO", "Loading mini list from: $sourceUrl")
@@ -459,9 +424,13 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
 
             val body = response.body?.string() ?: ""
             val hosts = parseMiniHostLines(body, sourceUrl)
+            val countBefore = hostDao.getHostCount()
             hostDao.insertAll(hosts)
-            logger.appendLogSync("INFO", "Loaded ${hosts.size} hosts from $listName")
-            Result.success(hosts.size)
+            val countAfter = hostDao.getHostCount()
+            val actuallyAdded = countAfter - countBefore
+            val skipped = hosts.size - actuallyAdded
+            logger.appendLogSync("INFO", "Loaded ${hosts.size} hosts from $listName (new: $actuallyAdded, skip: $skipped)")
+            Result.success(Pair(actuallyAdded, skipped))
         } catch (e: Exception) {
             logger.appendLogSync("ERROR", "Failed to load $listName: ${e.message}")
             Result.failure(e)
@@ -469,6 +438,7 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
     }
 
     // Парсинг hosts-формата (0.0.0.0 domain или просто domain)
+    // Также понимает URL с протоколом (http://..., vless://... и т.д.)
     private fun parseMiniHostLines(text: String, source: String): List<Host> {
         val hosts = mutableListOf<Host>()
         val now = System.currentTimeMillis()
@@ -478,30 +448,44 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
             .filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("//") }
             .forEach { line ->
                 try {
-                    // Формат: "0.0.0.0 domain" или "127.0.0.1 domain" или просто "domain"
+                    // Если строка содержит протокол (xxx://) - делегируем в универсальный парсер
+                    if (line.contains("://")) {
+                        val host = parseHostLine(line, source, now)
+                        if (host != null) {
+                            hosts.add(host)
+                        }
+                        return@forEach
+                    }
+
+                    // Формат hosts: "0.0.0.0 domain" или "127.0.0.1 domain" или просто "domain"
                     val parts = line.split(Regex("\\s+"))
                     val domain = when {
                         parts.size >= 2 && (parts[0] == "0.0.0.0" || parts[0] == "127.0.0.1") -> parts[1]
                         parts.size == 1 && !parts[0].contains(".") -> return@forEach // skip
                         parts.size == 1 -> parts[0]
                         else -> return@forEach
-                    }
+                    }.lowercase()  // НЕ удаляем www./m. - могут иметь разные IP
+
                     // Пропускаем localhost и подобные
                     if (domain == "localhost" || domain.endsWith(".local")) return@forEach
 
-                    val id = generateHostId(domain)
-                    hosts.add(Host(
-                        id = id,
-                        source = source,
-                        dateAdded = now,
-                        hostType = "sni",
-                        hostString = domain,
-                        address = domain,
-                        port = 443,
-                        dnsIp1 = null
-                    ))
+                    // Используем UrlParser для корректного парсинга (включая IP адреса)
+                    val parsed = UrlParser.parse(domain)
+                    if (parsed != null) {
+                        val id = generateHostId(parsed.originalUrl.lowercase())
+                        hosts.add(Host(
+                            id = id,
+                            source = source,
+                            dateAdded = now,
+                            hostType = parsed.protocol,
+                            hostString = parsed.originalUrl.lowercase(),
+                            address = parsed.hostname,
+                            port = parsed.port,
+                            dnsIp1 = null
+                        ))
+                    }
                 } catch (e: Exception) {
-                    // Пропускаем невалидные строки
+                    logger.appendLogSync("WARN", "Failed to parse mini line: $line - ${e.message}")
                 }
             }
 
@@ -514,18 +498,8 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
         return bytes.joinToString("") { "%02x".format(it) }
     }
 
-    // Проверка IP адреса
-    private fun isIpAddress(address: String): Boolean {
-        // IPv4
-        val ipv4Regex = Regex("^(\\d{1,3}\\.){3}\\d{1,3}$")
-        if (ipv4Regex.matches(address)) {
-            return address.split(".").all { it.toIntOrNull() in 0..255 }
-        }
-
-        // IPv6
-        val ipv6Regex = Regex("^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$")
-        return ipv6Regex.matches(address)
-    }
+    // Проверка IP адреса (делегируем UrlParser)
+    private fun isIpAddress(address: String): Boolean = UrlParser.isIpAddress(address)
 
     // Очистка DNS резолвов (не чистит чистые IP адреса)
     suspend fun clearDns() = withContext(Dispatchers.IO) {
@@ -564,8 +538,8 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
     }
 
 
-    // GeoIP резолвинг для хостов
-    // Возвращает Pair(resolved, skipped) где skipped = уже имеющие geoIp или нет IP
+    // GeoIP резолвинг для хостов (параллельный с Semaphore, ограничен для API rate limit)
+    // Возвращает Pair(resolved, skipped) где skipped = уже имеющие geoIp
     suspend fun fillGeoIp(
         hostIds: List<String>? = null,
         onProgress: (Int, Int) -> Unit
@@ -577,37 +551,63 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
                 hostDao.getAllHostsList()
             }
 
-            // Хосты для резолва: есть IP (dnsIp1 или address если IP) И нет geoIp
+            // Хосты для резолва: нет geoIp (или пустая строка)
             val hostsToResolve = allHosts.filter { host ->
-                host.geoIp == null && (host.dnsIp1 != null || isIpAddress(host.address))
+                host.geoIp.isNullOrEmpty()
             }
             val skipped = allHosts.size - hostsToResolve.size
             val total = hostsToResolve.size
-            var resolved = 0
 
-            logger.appendLogSync("INFO", "Starting GeoIP resolution for $total hosts (skipped: $skipped)")
+            // GeoIP API имеет rate limit 45 запросов/мин = 1 запрос каждые 1.3 сек
+            // Ограничиваем до 1 потока чтобы контролировать rate
+            val concurrentStreams = 1
+            logger.appendLogSync("INFO", "Starting GeoIP resolution for $total hosts (skipped: $skipped, streams: $concurrentStreams)")
 
-            hostsToResolve.forEachIndexed { index, host ->
-                onProgress(index + 1, total)
+            val resolvedCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val progressCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val semaphore = Semaphore(concurrentStreams)
 
-                // Используем dnsIp1 если есть, иначе address
-                val ip = host.dnsIp1 ?: host.address
+            coroutineScope {
+                hostsToResolve.map { host ->
+                    async {
+                        semaphore.withPermit {
+                            // Определяем что использовать для GeoIP запроса
+                            // Приоритет: dnsIp1 -> dnsIp2 -> dnsIp3 -> address (если IP) -> hostname (резолв по имени)
+                            // НЕ делаем автоматический DNS lookup - GeoIP и DNS это разные операции
+                            val target: String? = when {
+                                host.dnsIp1 != null -> host.dnsIp1
+                                host.dnsIp2 != null -> host.dnsIp2
+                                host.dnsIp3 != null -> host.dnsIp3
+                                isIpAddress(host.address) -> host.address
+                                else -> {
+                                    // Для hostname без DNS IP - пробуем резолв по имени хоста напрямую
+                                    // ip-api.com поддерживает резолв по hostname
+                                    host.address
+                                }
+                            }
 
-                try {
-                    val geoInfo = resolveGeoIp(ip)
-                    if (geoInfo != null) {
-                        hostDao.updateGeoIp(host.id, geoInfo)
-                        resolved++
-                        logger.appendLogSync("DEBUG", "GeoIP for $ip: $geoInfo")
+                            if (target != null) {
+                                try {
+                                    val geoInfo = resolveGeoIp(target)
+                                    if (geoInfo != null) {
+                                        hostDao.updateGeoIp(host.id, geoInfo)
+                                        resolvedCount.incrementAndGet()
+                                        logger.appendLogSync("DEBUG", "GeoIP for $target: $geoInfo")
+                                    }
+                                } catch (e: Exception) {
+                                    logger.appendLogSync("WARN", "GeoIP failed for $target: ${e.message}")
+                                }
+
+                                // Задержка для rate limit ip-api.com (45 запросов/мин = 1.33 сек между запросами)
+                                kotlinx.coroutines.delay(50)
+                            }
+                            onProgress(progressCount.incrementAndGet(), total)
+                        }
                     }
-                } catch (e: Exception) {
-                    logger.appendLogSync("WARN", "GeoIP failed for $ip: ${e.message}")
-                }
-
-                // Небольшая задержка чтобы не перегружать API (ip-api.com rate limit)
-                kotlinx.coroutines.delay(100)
+                }.awaitAll()
             }
 
+            val resolved = resolvedCount.get()
             logger.appendLogSync("INFO", "GeoIP completed: $resolved/$total resolved, $skipped skipped")
             Result.success(Pair(resolved, skipped))
         } catch (e: Exception) {
@@ -640,7 +640,7 @@ class HostRepository(context: Context, private val logger: PersistentLogger) {
                     val ccMatch = Regex("\"countryCode\"\\s*:\\s*\"([^\"]+)\"").find(body)
                     val cityMatch = Regex("\"city\"\\s*:\\s*\"([^\"]+)\"").find(body)
 
-                    val cc = ccMatch?.groupValues?.get(1)
+                    val cc = ccMatch?.groupValues?.get(1)?.takeIf { it.isNotEmpty() }
                     val city = cityMatch?.groupValues?.get(1) ?: ""
 
                     if (cc == null) {

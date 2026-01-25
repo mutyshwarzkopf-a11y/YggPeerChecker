@@ -49,7 +49,13 @@ import com.example.yggpeerchecker.ui.theme.ThemeManager
 import com.example.yggpeerchecker.ui.theme.ThemeMode
 import kotlin.math.roundToInt
 
-private const val CURRENT_VERSION = "0.6.1"
+// Версия берётся из BuildConfig (fallback "unknown" если недоступен)
+private val CURRENT_VERSION: String
+    get() = try {
+        com.example.yggpeerchecker.BuildConfig.VERSION_NAME
+    } catch (e: Exception) {
+        "unknown"
+    }
 private const val GITHUB_RELEASES_API = "https://api.github.com/repos/mutyshwarzkopf-a11y/YggPeerChecker/releases"
 
 @Composable
@@ -108,12 +114,12 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
                         concurrentStreams = newValue
                         prefs.edit().putInt("concurrent_streams", newValue.roundToInt()).apply()
                     },
-                    valueRange = 1f..30f,
-                    steps = 28,
+                    valueRange = 1f..20f,
+                    steps = 18,
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = "Controls parallel network checks (1-30)",
+                    text = "Controls parallel network checks (1-20)",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -252,29 +258,47 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
                                         val conn = url.openConnection() as java.net.HttpURLConnection
                                         conn.requestMethod = "GET"
                                         conn.setRequestProperty("Accept", "application/vnd.github.v3+json")
+                                        conn.setRequestProperty("User-Agent", "YggPeerChecker/$CURRENT_VERSION")
                                         conn.connectTimeout = 10000
                                         conn.readTimeout = 10000
 
-                                        if (conn.responseCode == 200) {
+                                        val responseCode = conn.responseCode
+                                        if (responseCode == 200) {
                                             val response = conn.inputStream.bufferedReader().readText()
                                             val releases = JSONArray(response)
                                             if (releases.length() > 0) {
                                                 val latest = releases.getJSONObject(0)
                                                 latest.getString("tag_name").removePrefix("v")
-                                            } else null
-                                        } else null
+                                            } else "no_releases"
+                                        } else {
+                                            "http_$responseCode"
+                                        }
                                     }
 
-                                    if (result != null && result != CURRENT_VERSION) {
-                                        updateStatus = "New version: $result"
-                                        Toast.makeText(context, "Update available: $result", Toast.LENGTH_LONG).show()
-                                    } else if (result == CURRENT_VERSION) {
-                                        updateStatus = "Up to date"
-                                    } else {
-                                        updateStatus = "No releases found"
+                                    when {
+                                        result == "no_releases" -> {
+                                            updateStatus = "No releases yet (v$CURRENT_VERSION is dev)"
+                                        }
+                                        result.startsWith("http_") -> {
+                                            updateStatus = "GitHub API error: ${result.removePrefix("http_")}"
+                                        }
+                                        compareVersions(result, CURRENT_VERSION) > 0 -> {
+                                            updateStatus = "New: v$result (current: v$CURRENT_VERSION)"
+                                            Toast.makeText(context, "Update available: v$result", Toast.LENGTH_LONG).show()
+                                        }
+                                        compareVersions(result, CURRENT_VERSION) < 0 -> {
+                                            updateStatus = "Dev version (latest release: v$result)"
+                                        }
+                                        else -> {
+                                            updateStatus = "Up to date (v$CURRENT_VERSION)"
+                                        }
                                     }
+                                } catch (e: java.net.UnknownHostException) {
+                                    updateStatus = "No internet connection"
+                                } catch (e: java.net.SocketTimeoutException) {
+                                    updateStatus = "Connection timeout"
                                 } catch (e: Exception) {
-                                    updateStatus = "Error: ${e.message?.take(30)}"
+                                    updateStatus = "Error: ${e.javaClass.simpleName}"
                                 }
                                 isCheckingUpdate = false
                             }
@@ -306,12 +330,30 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
                     Text(
                         text = updateStatus,
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (updateStatus.startsWith("New"))
-                            MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant
+                        color = when {
+                            updateStatus.startsWith("New") -> MaterialTheme.colorScheme.primary
+                            updateStatus.startsWith("Dev") -> MaterialTheme.colorScheme.tertiary
+                            updateStatus.startsWith("Up to date") -> MaterialTheme.colorScheme.secondary
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        }
                     )
                 }
             }
         }
     }
+}
+
+// Сравнение семантических версий: 1 если v1 > v2, -1 если v1 < v2, 0 если равны
+private fun compareVersions(v1: String, v2: String): Int {
+    val parts1 = v1.split(".").map { it.toIntOrNull() ?: 0 }
+    val parts2 = v2.split(".").map { it.toIntOrNull() ?: 0 }
+
+    val maxLen = maxOf(parts1.size, parts2.size)
+    for (i in 0 until maxLen) {
+        val p1 = parts1.getOrElse(i) { 0 }
+        val p2 = parts2.getOrElse(i) { 0 }
+        if (p1 > p2) return 1
+        if (p1 < p2) return -1
+    }
+    return 0
 }

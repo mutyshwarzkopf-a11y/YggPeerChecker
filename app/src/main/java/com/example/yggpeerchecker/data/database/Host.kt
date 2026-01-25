@@ -27,10 +27,14 @@ data class Host(
         // Типы хостов для Ygg пиров
         val YGG_TYPES = setOf("tcp", "tls", "quic", "ws", "wss")
 
-        // Типы хостов для SNI/общих проверок
-        val SNI_TYPES = setOf("sni", "http", "https")
+        // Типы хостов для SNI/общих проверок (включая прокси)
+        val SNI_TYPES = setOf("sni", "http", "https", "vless", "vmess")
+
+        // Типы прокси (vless/vmess) - подмножество SNI
+        val PROXY_TYPES = setOf("vless", "vmess")
 
         fun isYggType(type: String): Boolean = type.lowercase() in YGG_TYPES
         fun isSniType(type: String): Boolean = type.lowercase() in SNI_TYPES
+        fun isProxyType(type: String): Boolean = type.lowercase() in PROXY_TYPES
     }
 }

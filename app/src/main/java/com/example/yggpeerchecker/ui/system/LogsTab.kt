@@ -109,13 +109,17 @@ fun LogsTab(modifier: Modifier = Modifier) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Level toggle button (OFF/ALL)
+            // Level toggle button (OFF/ERROR/ALL)
             Button(
                 onClick = { showLevelMenu = true },
                 modifier = Modifier.height(36.dp)
             ) {
                 Text(
-                    if (selectedLevel == PersistentLogger.LogLevel.ALL) "ALL" else "OFF",
+                    when (selectedLevel) {
+                        PersistentLogger.LogLevel.ALL -> "ALL"
+                        PersistentLogger.LogLevel.ERROR -> "ERROR"
+                        else -> "OFF"
+                    },
                     fontSize = 12.sp
                 )
                 Spacer(modifier = Modifier.width(4.dp))
@@ -126,14 +130,15 @@ fun LogsTab(modifier: Modifier = Modifier) {
                 )
             }
 
-            // Dropdown menu - только OFF и ALL
+            // Dropdown menu - OFF, ERROR, ALL
             DropdownMenu(
                 expanded = showLevelMenu,
                 onDismissRequest = { showLevelMenu = false }
             ) {
                 listOf(
-                    PersistentLogger.LogLevel.OFF to "OFF - выключено",
-                    PersistentLogger.LogLevel.ALL to "ALL - пишет всё"
+                    PersistentLogger.LogLevel.OFF to "OFF - disabled",
+                    PersistentLogger.LogLevel.ERROR to "ERROR - errors only",
+                    PersistentLogger.LogLevel.ALL to "ALL - all logs"
                 ).forEach { (level, label) ->
                     DropdownMenuItem(
                         text = { Text(label) },
