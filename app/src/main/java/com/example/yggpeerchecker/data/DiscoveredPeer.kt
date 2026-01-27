@@ -32,18 +32,12 @@ data class DiscoveredPeer(
     // Хост жив если есть хоть один положительный ответ по любой проверке
     fun isAlive(): Boolean = pingMs >= 0 || yggRttMs >= 0 || portDefaultMs >= 0 || port80Ms >= 0 || port443Ms >= 0
 
-    fun getRttFormatted(): String = "${rtt}ms"
-    fun getPingFormatted(): String = if (ping >= 0) "${ping}ms" else "---"
-
     // Форматирование результата проверки
     fun formatCheckResult(value: Long): String = when {
         value >= 0 -> "${value}ms"
         value == -2L -> "X"
         else -> "off"
     }
-    
-    // Форматирование hops
-    fun formatHops(): String = if (hops > 0) "${hops}h" else "---"
 
     fun getErrorReason(): String = when {
         checkError.contains("timeout") -> "Timeout"

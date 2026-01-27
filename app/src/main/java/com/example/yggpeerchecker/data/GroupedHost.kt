@@ -22,16 +22,6 @@ data class HostAddress(
 ) {
     val isAlive: Boolean
         get() = pingResult >= 0 || port80Result >= 0 || port443Result >= 0
-
-    fun formatPing(): String = formatValue(pingResult)
-    fun formatP80(): String = formatValue(port80Result)
-    fun formatP443(): String = formatValue(port443Result)
-
-    private fun formatValue(value: Long): String = when {
-        value >= 0 -> "${value}ms"
-        value == -2L -> "X"
-        else -> "off"
-    }
 }
 
 /**
@@ -46,15 +36,6 @@ data class EndpointCheckResult(
 ) {
     val isAlive: Boolean
         get() = yggRttMs >= 0 || portDefaultMs >= 0
-
-    fun formatYggRtt(): String = formatValue(yggRttMs)
-    fun formatPortDef(): String = formatValue(portDefaultMs)
-
-    private fun formatValue(value: Long): String = when {
-        value >= 0 -> "${value}ms"
-        value == -2L -> "X"
-        else -> "off"
-    }
 }
 
 /**
@@ -123,11 +104,6 @@ data class GroupedHost(
      * Количество живых адресов
      */
     val aliveAddressCount: Int get() = addresses.count { it.isAlive }
-
-    /**
-     * Форматирование hops
-     */
-    fun formatHops(): String = if (hops > 0) "hops:$hops" else ""
 
     /**
      * Лучший (минимальный) результат проверки среди всех адресов и endpoints

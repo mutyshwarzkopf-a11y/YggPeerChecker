@@ -299,6 +299,7 @@ class HostRepository(private val context: Context, private val logger: Persisten
                             try {
                                 val ips = resolveDns(host.address)
                                 if (ips.isNotEmpty()) {
+                                    // Обновляем ТОЛЬКО если есть результаты резолва
                                     hostDao.updateDnsIps(
                                         hostId = host.id,
                                         ip1 = ips.getOrNull(0),
@@ -307,7 +308,7 @@ class HostRepository(private val context: Context, private val logger: Persisten
                                         timestamp = now
                                     )
 
-                                    // Сохраняем в DNS кэш
+                                    // Сохраняем в DNS кэш ТОЛЬКО если есть результаты
                                     dnsCacheDao.insert(
                                         DnsCache(
                                             hostname = host.address,
@@ -321,10 +322,11 @@ class HostRepository(private val context: Context, private val logger: Persisten
                                     resolvedCount.incrementAndGet()
                                     logger.appendLogSync("DEBUG", "Resolved ${host.address}: ${ips.joinToString()}")
                                 } else {
-                                    // DNS резолв не вернул результатов - логируем
+                                    // DNS резолв не вернул результатов - НЕ заполняем поля dnsIp, просто логируем
                                     logger.appendLogSync("WARN", "DNS empty result for ${host.address}")
                                 }
                             } catch (e: Exception) {
+                                // При ошибке резолва НЕ заполняем поля dnsIp
                                 logger.appendLogSync("WARN", "DNS resolution failed for ${host.address}: ${e.message}")
                             }
                             onProgress(progressCount.incrementAndGet(), total)

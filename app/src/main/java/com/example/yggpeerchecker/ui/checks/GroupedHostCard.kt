@@ -182,6 +182,9 @@ private fun GroupHeaderRow(
  */
 @Composable
 private fun AddressRow(addr: HostAddress) {
+    // Определяем, является ли адрес fallback (ip1/ip2/ip3)
+    val isFallback = addr.type != AddressType.HST
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -194,12 +197,13 @@ private fun AddressRow(addr: HostAddress) {
             modifier = Modifier.weight(1f),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Тип (hst, ip1, ip2, ip3)
+            // Тип (hst, ip1, ip2, ip3) с визуальным отличием для fallback
             Text(
                 text = "${addr.type.displayName}:",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.width(32.dp)
+                color = if (isFallback) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
+                modifier = Modifier.width(32.dp),
+                fontWeight = if (isFallback) FontWeight.Normal else FontWeight.Medium
             )
 
             // Адрес
@@ -207,7 +211,12 @@ private fun AddressRow(addr: HostAddress) {
                 text = addr.address,
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
-                maxLines = 1
+                maxLines = 1,
+                color = if (isFallback) {
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                }
             )
         }
 
@@ -261,6 +270,9 @@ private fun EndpointRow(
     isSelected: Boolean,
     onToggle: () -> Unit
 ) {
+    // Определяем, является ли endpoint fallback (ip1/ip2/ip3)
+    val isFallback = result.addressType != AddressType.HST
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -277,12 +289,17 @@ private fun EndpointRow(
 
         Spacer(modifier = Modifier.width(4.dp))
 
-        // protocol://type:port
+        // protocol://type:port с визуальным отличием для fallback
         Text(
             text = endpoint.shortDisplay(result.addressType),
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
-            modifier = Modifier.weight(1f)
+            modifier = Modifier.weight(1f),
+            color = if (isFallback) {
+                MaterialTheme.colorScheme.tertiary
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            }
         )
 
         // Результаты специфичных проверок
