@@ -5,6 +5,7 @@ import com.example.yggpeerchecker.data.database.AppDatabase
 import com.example.yggpeerchecker.data.database.CheckResult
 import com.example.yggpeerchecker.data.database.DnsCache
 import com.example.yggpeerchecker.data.database.Host
+import com.example.yggpeerchecker.utils.DnsResolver
 import com.example.yggpeerchecker.utils.PersistentLogger
 import com.example.yggpeerchecker.utils.UrlParser
 import kotlinx.coroutines.Dispatchers
@@ -33,10 +34,16 @@ class HostRepository(private val context: Context, private val logger: Persisten
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    // Получение concurrent_streams из SharedPreferences (config_prefs)
+    // Получение concurrent_streams из SharedPreferences
     private fun getConcurrentStreams(): Int {
-        val prefs = context.getSharedPreferences("config_prefs", Context.MODE_PRIVATE)
+        val prefs = context.getSharedPreferences("ygg_prefs", Context.MODE_PRIVATE)
         return prefs.getInt("concurrent_streams", 10)
+    }
+
+    // Получение geoip_delay_ms из SharedPreferences (40-100ms, default 40)
+    private fun getGeoIpDelayMs(): Long {
+        val prefs = context.getSharedPreferences("ygg_prefs", Context.MODE_PRIVATE)
+        return prefs.getInt("geoip_delay_ms", 40).toLong()
     }
 
     companion object {
@@ -297,7 +304,7 @@ class HostRepository(private val context: Context, private val logger: Persisten
                     async {
                         semaphore.withPermit {
                             try {
-                                val ips = resolveDns(host.address)
+                                val (ips, isSpoofed) = resolveDns(host.address)
                                 if (ips.isNotEmpty()) {
                                     // Обновляем ТОЛЬКО если есть результаты резолва
                                     hostDao.updateDnsIps(
@@ -320,7 +327,11 @@ class HostRepository(private val context: Context, private val logger: Persisten
                                     )
 
                                     resolvedCount.incrementAndGet()
-                                    logger.appendLogSync("DEBUG", "Resolved ${host.address}: ${ips.joinToString()}")
+                                    val spoofedMark = if (isSpoofed) " [SPOOFED]" else ""
+                                    logger.appendLogSync("DEBUG", "Resolved ${host.address}: ${ips.joinToString()}$spoofedMark")
+                                } else if (isSpoofed) {
+                                    // DNS подмена без валидных IP - логируем предупреждение
+                                    logger.appendLogSync("WARN", "DNS spoofed for ${host.address} - no valid IPs")
                                 } else {
                                     // DNS резолв не вернул результатов - НЕ заполняем поля dnsIp, просто логируем
                                     logger.appendLogSync("WARN", "DNS empty result for ${host.address}")
@@ -344,23 +355,17 @@ class HostRepository(private val context: Context, private val logger: Persisten
         }
     }
 
-    // DNS резолв одного хоста (lowercase + IDN поддержка)
-    private fun resolveDns(hostname: String): List<String> {
-        return try {
-            // Приводим к lowercase и конвертируем IDN (кириллица и т.д.) в Punycode
-            val normalizedHost = try {
-                java.net.IDN.toASCII(hostname.lowercase().trim())
-            } catch (e: Exception) {
-                hostname.lowercase().trim()
-            }
-            
-            InetAddress.getAllByName(normalizedHost)
-                .map { it.hostAddress ?: "" }
-                .filter { it.isNotEmpty() }
-                .take(3)
-        } catch (e: Exception) {
-            emptyList()
+    // DNS резолв одного хоста через выбранный DNS сервер
+    // Возвращает пару: (список IP, флаг подмены)
+    private fun resolveDns(hostname: String): Pair<List<String>, Boolean> {
+        val dnsServer = DnsResolver.getSelectedDnsServer(context)
+        val result = DnsResolver.resolve(hostname, dnsServer, 5000)
+
+        if (result.isSpoofed) {
+            logger.appendLogSync("WARN", "DNS spoofing detected for $hostname (127.0.0.1)")
         }
+
+        return Pair(result.ips, result.isSpoofed)
     }
 
     // Сохранение результата проверки
@@ -600,8 +605,8 @@ class HostRepository(private val context: Context, private val logger: Persisten
                                     logger.appendLogSync("WARN", "GeoIP failed for $target: ${e.message}")
                                 }
 
-                                // Задержка для rate limit ip-api.com (45 запросов/мин = 1.33 сек между запросами)
-                                kotlinx.coroutines.delay(50)
+                                // Задержка для rate limit ip-api.com
+                                kotlinx.coroutines.delay(getGeoIpDelayMs())
                             }
                             onProgress(progressCount.incrementAndGet(), total)
                         }

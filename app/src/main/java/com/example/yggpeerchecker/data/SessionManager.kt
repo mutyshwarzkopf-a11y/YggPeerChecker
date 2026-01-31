@@ -69,22 +69,10 @@ class SessionManager(private val context: Context) {
                 put("peersCount", peers.size)
                 put("availableCount", peers.count { it.isAlive() })
 
-                // Сохраняем peers
+                // Сохраняем peers (полный формат для совместимости с экспортом)
                 val peersArray = JSONArray()
                 peers.forEach { peer ->
-                    peersArray.put(JSONObject().apply {
-                        put("address", peer.address)
-                        put("protocol", peer.protocol)
-                        put("region", peer.region)
-                        put("geoIp", peer.geoIp)
-                        put("rtt", peer.rtt)
-                        put("pingMs", peer.pingMs)
-                        put("yggRttMs", peer.yggRttMs)
-                        put("portDefaultMs", peer.portDefaultMs)
-                        put("port80Ms", peer.port80Ms)
-                        put("port443Ms", peer.port443Ms)
-                        put("checkError", peer.checkError)
-                    })
+                    peersArray.put(peer.toSaveJson())
                 }
                 put("peers", peersArray)
 
@@ -128,27 +116,16 @@ class SessionManager(private val context: Context) {
 
                 val json = JSONObject(file.readText())
 
-                // Загружаем peers
+                // Загружаем peers (поддерживаем полный и legacy формат)
                 val peersArray = json.getJSONArray("peers")
                 val peers = mutableListOf<DiscoveredPeer>()
                 for (i in 0 until peersArray.length()) {
-                    val peerJson = peersArray.getJSONObject(i)
-                    peers.add(DiscoveredPeer(
-                        address = peerJson.getString("address"),
-                        protocol = peerJson.optString("protocol", ""),
-                        region = peerJson.optString("region", ""),
-                        geoIp = peerJson.optString("geoIp", ""),
-                        rtt = peerJson.optLong("rtt", 0),
-                        available = false,
-                        responseMs = 0,
-                        lastSeen = 0,
-                        checkError = peerJson.optString("checkError", ""),
-                        pingMs = peerJson.optLong("pingMs", -1),
-                        yggRttMs = peerJson.optLong("yggRttMs", -1),
-                        portDefaultMs = peerJson.optLong("portDefaultMs", -1),
-                        port80Ms = peerJson.optLong("port80Ms", -1),
-                        port443Ms = peerJson.optLong("port443Ms", -1)
-                    ))
+                    try {
+                        val peerJson = peersArray.getJSONObject(i)
+                        peers.add(DiscoveredPeer.fromSaveJson(peerJson))
+                    } catch (e: Exception) {
+                        // Пропускаем битые записи
+                    }
                 }
 
                 // Загружаем hostResults

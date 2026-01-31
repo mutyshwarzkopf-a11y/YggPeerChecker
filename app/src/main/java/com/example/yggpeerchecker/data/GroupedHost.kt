@@ -5,9 +5,10 @@ package com.example.yggpeerchecker.data
  */
 enum class AddressType(val displayName: String) {
     HST("hst"),   // Основной hostname
-    IP1("ip1"),   // Первый DNS IP
-    IP2("ip2"),   // Второй DNS IP
-    IP3("ip3")    // Третий DNS IP
+    IP0("ip0"),   // Текущий резолвленный IP (при проверке, если отличается от кэшированных)
+    IP1("ip1"),   // Первый DNS IP (кэшированный)
+    IP2("ip2"),   // Второй DNS IP (кэшированный)
+    IP3("ip3")    // Третий DNS IP (кэшированный)
 }
 
 /**
@@ -59,9 +60,14 @@ data class HostEndpoint(
 
     /**
      * Краткое отображение: ws://hst:3333
+     * Для sni протокола не добавляем "sni://" - это внутреннее обозначение
      */
     fun shortDisplay(addressType: AddressType): String {
-        return "$protocol://${addressType.displayName}:$port"
+        return if (protocol == "sni") {
+            "${addressType.displayName}:$port"
+        } else {
+            "$protocol://${addressType.displayName}:$port"
+        }
     }
 }
 
@@ -123,6 +129,35 @@ data class GroupedHost(
 
         val allResults = addressResults + endpointResults
         return allResults.minOrNull() ?: Long.MAX_VALUE
+    }
+
+    /**
+     * Получить лучший результат для конкретного типа проверки
+     * Используется для сортировки групп по выбранному типу
+     */
+    fun getBestResultForType(checkType: String): Long {
+        return when (checkType) {
+            "PING" -> {
+                addresses.mapNotNull { it.pingResult.takeIf { r -> r >= 0 } }.minOrNull() ?: Long.MAX_VALUE
+            }
+            "YGG_RTT" -> {
+                endpoints.flatMap { endpoint ->
+                    endpoint.checkResults.mapNotNull { it.yggRttMs.takeIf { r -> r >= 0 } }
+                }.minOrNull() ?: Long.MAX_VALUE
+            }
+            "PORT_DEFAULT" -> {
+                endpoints.flatMap { endpoint ->
+                    endpoint.checkResults.mapNotNull { it.portDefaultMs.takeIf { r -> r >= 0 } }
+                }.minOrNull() ?: Long.MAX_VALUE
+            }
+            "PORT_80" -> {
+                addresses.mapNotNull { it.port80Result.takeIf { r -> r >= 0 } }.minOrNull() ?: Long.MAX_VALUE
+            }
+            "PORT_443" -> {
+                addresses.mapNotNull { it.port443Result.takeIf { r -> r >= 0 } }.minOrNull() ?: Long.MAX_VALUE
+            }
+            else -> getBestResultMs()  // По умолчанию - любой лучший результат
+        }
     }
 
     /**

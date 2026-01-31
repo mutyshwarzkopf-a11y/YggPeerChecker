@@ -62,6 +62,13 @@ object UrlParser {
             normalized = "https://" + normalized.substring(10)
         }
 
+        // Нормализация http://host (без явного порта) -> просто host
+        // Пользователи часто вводят http://host по привычке из браузера
+        val httpPrefixRegex = Regex("""^https?://([^/:?#\[\]]+)$""", RegexOption.IGNORE_CASE)
+        httpPrefixRegex.find(normalized)?.let { match ->
+            normalized = match.groupValues[1]
+        }
+
         // 1. Попытка парсинга vless://
         if (normalized.startsWith("vless://", ignoreCase = true)) {
             return parseVless(normalized)
@@ -201,10 +208,20 @@ object UrlParser {
     /**
      * Построение нормализованного URL
      * НЕ добавляем порт если он совпадает с дефолтным для протокола
+     * Для "sni" протокола не добавляем префикс "sni://" - это внутреннее обозначение
      */
     private fun buildNormalizedUrl(protocol: String, hostname: String, port: Int?, ipVersion: Int?): String {
         val host = if (ipVersion == 6) "[$hostname]" else hostname
         val defaultPort = getDefaultPort(protocol)
+
+        // Для "sni" не добавляем протокол - это условное внутреннее обозначение
+        if (protocol == "sni") {
+            return if (port != null && port != defaultPort) {
+                "$host:$port"
+            } else {
+                host
+            }
+        }
 
         // Добавляем порт ТОЛЬКО если он отличается от дефолтного
         return if (port != null && port != defaultPort) {

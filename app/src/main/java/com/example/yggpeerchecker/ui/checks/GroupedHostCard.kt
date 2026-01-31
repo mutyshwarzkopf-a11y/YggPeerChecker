@@ -182,8 +182,14 @@ private fun GroupHeaderRow(
  */
 @Composable
 private fun AddressRow(addr: HostAddress) {
-    // Определяем, является ли адрес fallback (ip1/ip2/ip3)
-    val isFallback = addr.type != AddressType.HST
+    // Определяем тип адреса для визуального отличия
+    val isHst = addr.type == AddressType.HST
+    val isIp0 = addr.type == AddressType.IP0  // Текущий резолвленный IP (отличается от кэшированных)
+    val isFallback = !isHst && !isIp0  // ip1, ip2, ip3
+    // Обнаружение DNS spoofing (localhost адреса)
+    val isSpoofed = isIp0 && addr.address.lowercase().trim() in setOf(
+        "127.0.0.1", "0.0.0.0", "::1", "localhost", "127.0.0.0", "0:0:0:0:0:0:0:1"
+    )
 
     Row(
         modifier = Modifier
@@ -197,13 +203,17 @@ private fun AddressRow(addr: HostAddress) {
             modifier = Modifier.weight(1f),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Тип (hst, ip1, ip2, ip3) с визуальным отличием для fallback
+            // Тип (hst, ip0, ip1, ip2, ip3) с визуальным отличием
             Text(
                 text = "${addr.type.displayName}:",
                 style = MaterialTheme.typography.labelSmall,
-                color = if (isFallback) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
+                color = when {
+                    isIp0 -> MaterialTheme.colorScheme.error  // ip0 выделен красным (текущий, отличается)
+                    isHst -> MaterialTheme.colorScheme.primary
+                    else -> MaterialTheme.colorScheme.tertiary
+                },
                 modifier = Modifier.width(32.dp),
-                fontWeight = if (isFallback) FontWeight.Normal else FontWeight.Medium
+                fontWeight = if (isHst || isIp0) FontWeight.Medium else FontWeight.Normal
             )
 
             // Адрес
@@ -212,12 +222,22 @@ private fun AddressRow(addr: HostAddress) {
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 maxLines = 1,
-                color = if (isFallback) {
-                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
-                } else {
-                    MaterialTheme.colorScheme.onSurface
+                color = when {
+                    isSpoofed -> Color.Red
+                    isFallback -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
+                    else -> MaterialTheme.colorScheme.onSurface
                 }
             )
+            // Индикатор DNS spoofing
+            if (isSpoofed) {
+                Text(
+                    text = " DNS!",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.Red,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp
+                )
+            }
         }
 
         // Результаты общих проверок

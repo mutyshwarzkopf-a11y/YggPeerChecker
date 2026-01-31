@@ -3,7 +3,10 @@ package com.example.yggpeerchecker.ui.checks
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -30,10 +33,12 @@ import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.material.icons.filled.ViewModule
@@ -74,6 +79,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.yggpeerchecker.data.DiscoveredPeer
 import com.example.yggpeerchecker.data.GroupedHost
@@ -101,10 +107,54 @@ fun ChecksScreen(
     var useGroupedView by remember { mutableStateOf(false) }  // Переключатель вида: группы/плоский список
     val scope = rememberCoroutineScope()
 
-    // Обновляем группы когда поиск завершён
-    LaunchedEffect(uiState.isSearching) {
-        if (!uiState.isSearching && uiState.peers.isNotEmpty()) {
+    // File picker для импорта сессий
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.importSession(uri)
+            Toast.makeText(context, "Importing session...", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Сохранение сессии в выбранную папку
+    var sessionFileToSave by remember { mutableStateOf<String?>(null) }
+    val saveLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null && sessionFileToSave != null) {
+            val sourceFile = viewModel.getSessionFilePath(sessionFileToSave!!)
+            if (sourceFile != null) {
+                try {
+                    context.contentResolver.openOutputStream(uri)?.use { output ->
+                        sourceFile.inputStream().use { input ->
+                            input.copyTo(output)
+                        }
+                    }
+                    Toast.makeText(context, "Session saved", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Save error: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        sessionFileToSave = null
+    }
+
+    // Обновляем группы когда поиск завершён или переключаемся в grouped view
+    LaunchedEffect(uiState.isSearching, useGroupedView) {
+        if (!uiState.isSearching && uiState.peers.isNotEmpty() && useGroupedView) {
             viewModel.updateGroupsWithResults()
+        }
+    }
+
+    // Синхронизация выбора при переключении между режимами
+    LaunchedEffect(useGroupedView) {
+        if (useGroupedView) {
+            // Переключились в grouped режим - конвертируем выбор из flat
+            viewModel.syncSelectionToGrouped()
+        } else {
+            // Переключились в flat режим - конвертируем выбор из grouped
+            viewModel.syncSelectionToFlat()
         }
     }
 
@@ -171,7 +221,7 @@ fun ChecksScreen(
     }
 
     // Фильтрованный список групп для grouped view
-    val filteredGroupedHosts = remember(uiState.groupedHosts, uiState.typeFilter, uiState.sourceFilter) {
+    val filteredGroupedHosts = remember(uiState.groupedHosts, uiState.typeFilter, uiState.sourceFilter, uiState.sortType, uiState.filterMs) {
         var result = uiState.groupedHosts
 
         // Фильтр по источнику
@@ -198,6 +248,20 @@ fun ChecksScreen(
             }
             else -> result
         }
+
+        // Фильтр по ms (если включен) - по лучшему результату выбранного типа
+        if (uiState.filterMs > 0) {
+            result = result.filter { group ->
+                val best = group.getBestResultForType(uiState.sortType.name)
+                best in 0..uiState.filterMs
+            }
+        }
+
+        // Сортировка по выбранному типу проверки (лучший результат среди адресов)
+        result = result.sortedWith(
+            compareByDescending<GroupedHost> { it.isAlive }
+                .thenBy { it.getBestResultForType(uiState.sortType.name) }
+        )
 
         result
     }
@@ -339,7 +403,7 @@ fun ChecksScreen(
 
         // Краткая информация о настройках
         Text(
-            text = "Checks: ${uiState.enabledCheckTypes.joinToString { it.displayName }}${if (uiState.fastMode) " [Fast]" else ""}",
+            text = "Checks: ${uiState.enabledCheckTypes.joinToString { it.displayName }}${if (uiState.fastMode) " [Quick]" else ""}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
@@ -360,10 +424,21 @@ fun ChecksScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(checkType.displayName)
+                                // PING всегда активен - отображаем с пометкой
+                                Text(
+                                    text = if (checkType == CheckType.PING)
+                                        "${checkType.displayName} (always)"
+                                    else
+                                        checkType.displayName,
+                                    color = if (checkType == CheckType.PING)
+                                        MaterialTheme.colorScheme.primary
+                                    else
+                                        MaterialTheme.colorScheme.onSurface
+                                )
                                 Checkbox(
                                     checked = uiState.enabledCheckTypes.contains(checkType),
-                                    onCheckedChange = { viewModel.toggleCheckType(checkType) }
+                                    onCheckedChange = { viewModel.toggleCheckType(checkType) },
+                                    enabled = checkType != CheckType.PING  // PING нельзя отключить
                                 )
                             }
                         }
@@ -373,36 +448,17 @@ fun ChecksScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column {
-                                Text("Fast Mode", style = MaterialTheme.typography.labelMedium)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Quick Mode", style = MaterialTheme.typography.labelMedium)
                                 Text(
-                                    "Stop on first success",
+                                    "Stop on first success, check only first DNS IP",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                             Switch(
                                 checked = uiState.fastMode,
-                                onCheckedChange = { viewModel.toggleFastMode() }
-                            )
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column {
-                                Text("Always Check DNS IPs", style = MaterialTheme.typography.labelMedium)
-                                Text(
-                                    "Check fallback IPs even if main succeeds",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = uiState.alwaysCheckDnsIps,
-                                onCheckedChange = { viewModel.toggleAlwaysCheckDnsIps() }
+                                onCheckedChange = { viewModel.toggleQuickMode() }
                             )
                         }
 
@@ -542,15 +598,30 @@ fun ChecksScreen(
                 title = { Text("Sessions") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        // Кнопка сохранения
-                        Button(
-                            onClick = { showSaveDialog = true },
+                        // Кнопки Save + Import
+                        Row(
                             modifier = Modifier.fillMaxWidth(),
-                            enabled = uiState.peers.isNotEmpty()
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(Icons.Default.Save, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Save Current (${uiState.peers.size} peers)")
+                            Button(
+                                onClick = { showSaveDialog = true },
+                                modifier = Modifier.weight(1f),
+                                enabled = uiState.peers.isNotEmpty()
+                            ) {
+                                Icon(Icons.Default.Save, null, Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Save (${uiState.peers.size})", fontSize = 12.sp)
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    importLauncher.launch(arrayOf("application/json", "*/*"))
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Default.FileDownload, null, Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Import", fontSize = 12.sp)
+                            }
                         }
 
                         if (sessions.isEmpty()) {
@@ -573,7 +644,7 @@ fun ChecksScreen(
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .padding(12.dp),
+                                            .padding(8.dp),
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
@@ -585,15 +656,63 @@ fun ChecksScreen(
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
+                                        // Кнопка сохранения в папку
+                                        IconButton(
+                                            onClick = {
+                                                sessionFileToSave = session.fileName
+                                                saveLauncher.launch(session.fileName)
+                                            },
+                                            modifier = Modifier.size(36.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Save, null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                        // Кнопка экспорта (Share)
+                                        IconButton(
+                                            onClick = {
+                                                val file = viewModel.getSessionFilePath(session.fileName)
+                                                if (file != null) {
+                                                    try {
+                                                        val uri = FileProvider.getUriForFile(
+                                                            context,
+                                                            "${context.packageName}.fileprovider",
+                                                            file
+                                                        )
+                                                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                                            type = "application/json"
+                                                            putExtra(Intent.EXTRA_STREAM, uri)
+                                                            putExtra(Intent.EXTRA_SUBJECT, "YggPeerChecker: ${session.name}")
+                                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                        }
+                                                        context.startActivity(Intent.createChooser(shareIntent, "Export session"))
+                                                    } catch (e: Exception) {
+                                                        Toast.makeText(context, "Export error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                            },
+                                            modifier = Modifier.size(36.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Share, null,
+                                                tint = MaterialTheme.colorScheme.secondary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                        // Кнопка удаления
                                         IconButton(
                                             onClick = {
                                                 viewModel.deleteSession(session.fileName)
                                                 scope.launch { sessions = viewModel.getSessions() }
-                                            }
+                                            },
+                                            modifier = Modifier.size(36.dp)
                                         ) {
                                             Icon(
                                                 Icons.Default.Delete, null,
-                                                tint = MaterialTheme.colorScheme.error
+                                                tint = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.size(18.dp)
                                             )
                                         }
                                     }
@@ -707,8 +826,21 @@ fun ChecksScreen(
             ) {
                 IconButton(
                     onClick = {
-                        viewModel.clearPeersList()
-                        viewModel.clearEndpointSelection()
+                        val isAllFilters = uiState.typeFilter == "All" && uiState.sourceFilter == "All" && uiState.filterMs <= 0
+                        if (isAllFilters) {
+                            // Фильтр All-All: очищаем всё
+                            viewModel.clearPeersList()
+                            viewModel.clearEndpointSelection()
+                        } else {
+                            // Фильтр активен: очищаем только видимые
+                            if (useGroupedView) {
+                                val visibleKeys = filteredGroupedHosts.map { it.groupKey }.toSet()
+                                viewModel.clearVisibleHosts(visibleKeys, emptySet(), isGroupedMode = true)
+                            } else {
+                                val visibleAddrs = filteredPeers.map { it.address }.toSet()
+                                viewModel.clearVisibleHosts(emptySet(), visibleAddrs, isGroupedMode = false)
+                            }
+                        }
                     },
                     modifier = Modifier.size(40.dp)
                 ) {
@@ -718,13 +850,25 @@ fun ChecksScreen(
                 if (useGroupedView) {
                     // Grouped mode: работа с endpoints
                     val hasSelection = uiState.selectedEndpoints.isNotEmpty()
+                    // Собираем все живые endpoint URL из видимых групп
+                    val allAliveEndpointUrls = remember(filteredGroupedHosts) {
+                        filteredGroupedHosts.flatMap { group ->
+                            group.endpoints.flatMap { endpoint ->
+                                endpoint.checkResults.filter { it.isAlive }.map { it.fullUrl }
+                            }
+                        }
+                    }
                     IconButton(
-                        onClick = { viewModel.clearEndpointSelection() },
-                        enabled = hasSelection
+                        onClick = {
+                            if (allAliveEndpointUrls.isNotEmpty()) {
+                                viewModel.selectAllEndpoints(allAliveEndpointUrls)
+                            }
+                        },
+                        enabled = allAliveEndpointUrls.isNotEmpty()
                     ) {
                         Icon(
                             imageVector = if (hasSelection) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
-                            contentDescription = "Deselect All",
+                            contentDescription = if (hasSelection) "Deselect All" else "Select All Alive",
                             tint = if (hasSelection) OnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }

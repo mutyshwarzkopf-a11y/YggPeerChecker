@@ -48,6 +48,31 @@ data class DiscoveredPeer(
         else -> "Unknown"
     }
 
+    // Сериализация в JSON для persist
+    fun toSaveJson(): JSONObject {
+        return JSONObject().apply {
+            put("address", address)
+            put("protocol", protocol)
+            put("region", region)
+            put("geoIp", geoIp)
+            put("source", source)
+            put("sourceShort", sourceShort)
+            put("rtt", rtt)
+            put("available", available)
+            put("responseMs", responseMs)
+            put("lastSeen", lastSeen)
+            put("checkError", checkError)
+            put("ping", ping)
+            put("pingMs", pingMs)
+            put("yggRttMs", yggRttMs)
+            put("portDefaultMs", portDefaultMs)
+            put("port80Ms", port80Ms)
+            put("port443Ms", port443Ms)
+            put("hops", hops)
+            put("normalizedKey", normalizedKey)
+        }
+    }
+
     companion object {
         fun fromJson(json: JSONObject): DiscoveredPeer {
             // RTT is stored as nanoseconds (time.Duration), convert to milliseconds
@@ -63,6 +88,31 @@ data class DiscoveredPeer(
                 responseMs = json.optInt("response_ms", 0),
                 lastSeen = json.optLong("last_seen", 0),
                 checkError = json.optString("CheckError", "")
+            )
+        }
+
+        // Загрузка из persist JSON
+        fun fromSaveJson(json: JSONObject): DiscoveredPeer {
+            return DiscoveredPeer(
+                address = json.optString("address", ""),
+                protocol = json.optString("protocol", ""),
+                region = json.optString("region", ""),
+                geoIp = json.optString("geoIp", ""),
+                source = json.optString("source", ""),
+                sourceShort = json.optString("sourceShort", ""),
+                rtt = json.optLong("rtt", 0),
+                available = json.optBoolean("available", false),
+                responseMs = json.optInt("responseMs", 0),
+                lastSeen = json.optLong("lastSeen", 0),
+                checkError = json.optString("checkError", ""),
+                ping = json.optLong("ping", -1),
+                pingMs = json.optLong("pingMs", -1),
+                yggRttMs = json.optLong("yggRttMs", -1),
+                portDefaultMs = json.optLong("portDefaultMs", -1),
+                port80Ms = json.optLong("port80Ms", -1),
+                port443Ms = json.optLong("port443Ms", -1),
+                hops = json.optInt("hops", -1),
+                normalizedKey = json.optString("normalizedKey", "")
             )
         }
     }

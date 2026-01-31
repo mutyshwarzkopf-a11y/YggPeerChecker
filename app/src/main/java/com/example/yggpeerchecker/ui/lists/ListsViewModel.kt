@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 
 data class ListsUiState(
     val isLoading: Boolean = false,
+    val isListLoading: Boolean = false,   // Загрузка списка активна (можно отменить)
     val isDnsLoading: Boolean = false,    // DNS операция активна
     val isGeoIpLoading: Boolean = false,  // GeoIP операция активна
     val statusMessage: String = "Ready",
@@ -36,11 +37,13 @@ class ListsViewModel(
     private val _uiState = MutableStateFlow(ListsUiState())
     val uiState: StateFlow<ListsUiState> = _uiState.asStateFlow()
 
-    // Job для отмены DNS/GeoIP операций
+    // Job для отмены операций
+    private var loadJob: Job? = null      // Загрузка списков
     private var dnsJob: Job? = null
     private var geoIpJob: Job? = null
 
     init {
+        logger.appendLogSync("INFO", "ListsViewModel initialized")
         // Подписка на Flow из репозитория
         viewModelScope.launch {
             repository.getAllHostsFlow().collect { hosts ->
@@ -66,15 +69,18 @@ class ListsViewModel(
 
     fun clearAll() {
         viewModelScope.launch {
+            logger.appendLogSync("INFO", "Clearing all hosts")
             _uiState.update { it.copy(isLoading = true, statusMessage = "Clearing...") }
             try {
                 repository.clearAll()
+                logger.appendLogSync("INFO", "All hosts cleared")
                 _uiState.update { it.copy(
                     isLoading = false,
                     statusMessage = "List cleared",
                     lastError = null
                 )}
             } catch (e: Exception) {
+                logger.appendLogSync("ERROR", "Clear all failed: ${e.message}")
                 _uiState.update { it.copy(
                     isLoading = false,
                     statusMessage = "Error: ${e.message}",
@@ -84,9 +90,22 @@ class ListsViewModel(
         }
     }
 
+    // Отмена загрузки списка
+    fun cancelLoad() {
+        loadJob?.cancel()
+        loadJob = null
+        _uiState.update { it.copy(
+            isLoading = false,
+            isListLoading = false,
+            statusMessage = "Load cancelled"
+        )}
+        logger.appendLogSync("INFO", "List loading cancelled")
+    }
+
     fun loadYggNeilalexander() {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, lastError = null) }
+        logger.appendLogSync("INFO", "Loading peers from neilalexander")
+        loadJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, isListLoading = true, lastError = null) }
             val result = repository.loadYggPeers(
                 HostRepository.SOURCE_NEILALEXANDER
             ) { status ->
@@ -96,15 +115,19 @@ class ListsViewModel(
                 onSuccess = { (added, skipped) ->
                     val msg = if (skipped > 0) "Loaded $added peers, skip: $skipped (neilalexander)"
                               else "Loaded $added peers (neilalexander)"
+                    logger.appendLogSync("INFO", msg)
                     _uiState.update { it.copy(
                         isLoading = false,
+                        isListLoading = false,
                         statusMessage = msg,
                         lastSkipCount = skipped
                     )}
                 },
                 onFailure = { error ->
+                    logger.appendLogSync("ERROR", "Load neilalexander failed: ${error.message}")
                     _uiState.update { it.copy(
                         isLoading = false,
+                        isListLoading = false,
                         statusMessage = "Error: ${error.message}",
                         lastError = error.message
                     )}
@@ -114,8 +137,9 @@ class ListsViewModel(
     }
 
     fun loadYggLink() {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, lastError = null) }
+        logger.appendLogSync("INFO", "Loading peers from yggdrasil.link")
+        loadJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, isListLoading = true, lastError = null) }
             val result = repository.loadYggPeers(
                 HostRepository.SOURCE_YGGDRASIL_LINK
             ) { status ->
@@ -125,15 +149,19 @@ class ListsViewModel(
                 onSuccess = { (added, skipped) ->
                     val msg = if (skipped > 0) "Loaded $added peers, skip: $skipped (yggdrasil.link)"
                               else "Loaded $added peers (yggdrasil.link)"
+                    logger.appendLogSync("INFO", msg)
                     _uiState.update { it.copy(
                         isLoading = false,
+                        isListLoading = false,
                         statusMessage = msg,
                         lastSkipCount = skipped
                     )}
                 },
                 onFailure = { error ->
+                    logger.appendLogSync("ERROR", "Load yggdrasil.link failed: ${error.message}")
                     _uiState.update { it.copy(
                         isLoading = false,
+                        isListLoading = false,
                         statusMessage = "Error: ${error.message}",
                         lastError = error.message
                     )}
@@ -143,8 +171,9 @@ class ListsViewModel(
     }
 
     fun loadWhitelist() {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, lastError = null) }
+        logger.appendLogSync("INFO", "Loading whitelist")
+        loadJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, isListLoading = true, lastError = null) }
             val result = repository.loadWhitelist { status ->
                 _uiState.update { it.copy(statusMessage = status) }
             }
@@ -152,15 +181,19 @@ class ListsViewModel(
                 onSuccess = { (added, skipped) ->
                     val msg = if (skipped > 0) "Loaded $added hosts, skip: $skipped (whitelist)"
                               else "Loaded $added hosts (whitelist)"
+                    logger.appendLogSync("INFO", msg)
                     _uiState.update { it.copy(
                         isLoading = false,
+                        isListLoading = false,
                         statusMessage = msg,
                         lastSkipCount = skipped
                     )}
                 },
                 onFailure = { error ->
+                    logger.appendLogSync("ERROR", "Load whitelist failed: ${error.message}")
                     _uiState.update { it.copy(
                         isLoading = false,
+                        isListLoading = false,
                         statusMessage = "Error: ${error.message}",
                         lastError = error.message
                     )}
@@ -170,6 +203,7 @@ class ListsViewModel(
     }
 
     fun loadFromClipboard(text: String) {
+        logger.appendLogSync("INFO", "Loading from clipboard (${text.length} chars)")
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, statusMessage = "Loading from clipboard...", lastError = null) }
             val result = repository.loadFromText(text, "clipboard")
@@ -177,6 +211,7 @@ class ListsViewModel(
                 onSuccess = { (added, skipped) ->
                     val msg = if (skipped > 0) "Loaded $added hosts, skip: $skipped (clipboard)"
                               else "Loaded $added hosts from clipboard"
+                    logger.appendLogSync("INFO", msg)
                     _uiState.update { it.copy(
                         isLoading = false,
                         statusMessage = msg,
@@ -184,6 +219,7 @@ class ListsViewModel(
                     )}
                 },
                 onFailure = { error ->
+                    logger.appendLogSync("ERROR", "Load clipboard failed: ${error.message}")
                     _uiState.update { it.copy(
                         isLoading = false,
                         statusMessage = "Error: ${error.message}",
@@ -195,6 +231,7 @@ class ListsViewModel(
     }
 
     fun loadFromFile(text: String, fileName: String) {
+        logger.appendLogSync("INFO", "Loading from file: $fileName")
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, statusMessage = "Loading from file...", lastError = null) }
             val result = repository.loadFromText(text, "file:$fileName")
@@ -202,6 +239,7 @@ class ListsViewModel(
                 onSuccess = { (added, skipped) ->
                     val msg = if (skipped > 0) "Loaded $added hosts, skip: $skipped ($fileName)"
                               else "Loaded $added hosts from $fileName"
+                    logger.appendLogSync("INFO", msg)
                     _uiState.update { it.copy(
                         isLoading = false,
                         statusMessage = msg,
@@ -209,6 +247,7 @@ class ListsViewModel(
                     )}
                 },
                 onFailure = { error ->
+                    logger.appendLogSync("ERROR", "Load file failed: ${error.message}")
                     _uiState.update { it.copy(
                         isLoading = false,
                         statusMessage = "Error: ${error.message}",
@@ -220,8 +259,9 @@ class ListsViewModel(
     }
 
     fun loadVlessList() {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, lastError = null) }
+        logger.appendLogSync("INFO", "Loading vless list")
+        loadJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, isListLoading = true, lastError = null) }
             val result = repository.loadVlessList(HostRepository.SOURCE_VLESS_SUB) { status ->
                 _uiState.update { it.copy(statusMessage = status) }
             }
@@ -229,18 +269,21 @@ class ListsViewModel(
                 onSuccess = { (added, skipped) ->
                     val msg = if (skipped > 0) "Loaded $added vless, skip: $skipped"
                               else "Loaded $added vless hosts"
-                    _uiState.update { it.copy(isLoading = false, statusMessage = msg, lastSkipCount = skipped) }
+                    logger.appendLogSync("INFO", msg)
+                    _uiState.update { it.copy(isLoading = false, isListLoading = false, statusMessage = msg, lastSkipCount = skipped) }
                 },
                 onFailure = { error ->
-                    _uiState.update { it.copy(isLoading = false, statusMessage = "Error: ${error.message}", lastError = error.message) }
+                    logger.appendLogSync("ERROR", "Load vless failed: ${error.message}")
+                    _uiState.update { it.copy(isLoading = false, isListLoading = false, statusMessage = "Error: ${error.message}", lastError = error.message) }
                 }
             )
         }
     }
 
     fun loadMiniWhite() {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, lastError = null) }
+        logger.appendLogSync("INFO", "Loading Mini White list")
+        loadJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, isListLoading = true, lastError = null) }
             val result = repository.loadMiniList(HostRepository.SOURCE_MINI_WHITE, "Mini White") { status ->
                 _uiState.update { it.copy(statusMessage = status) }
             }
@@ -248,18 +291,21 @@ class ListsViewModel(
                 onSuccess = { (added, skipped) ->
                     val msg = if (skipped > 0) "Loaded $added hosts, skip: $skipped (Mini White)"
                               else "Loaded $added hosts (Mini White)"
-                    _uiState.update { it.copy(isLoading = false, statusMessage = msg, lastSkipCount = skipped) }
+                    logger.appendLogSync("INFO", msg)
+                    _uiState.update { it.copy(isLoading = false, isListLoading = false, statusMessage = msg, lastSkipCount = skipped) }
                 },
                 onFailure = { error ->
-                    _uiState.update { it.copy(isLoading = false, statusMessage = "Error: ${error.message}", lastError = error.message) }
+                    logger.appendLogSync("ERROR", "Load Mini White failed: ${error.message}")
+                    _uiState.update { it.copy(isLoading = false, isListLoading = false, statusMessage = "Error: ${error.message}", lastError = error.message) }
                 }
             )
         }
     }
 
     fun loadMiniBlack() {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, lastError = null) }
+        logger.appendLogSync("INFO", "Loading Mini Black list")
+        loadJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, isListLoading = true, lastError = null) }
             val result = repository.loadMiniList(HostRepository.SOURCE_MINI_BLACK, "Mini Black") { status ->
                 _uiState.update { it.copy(statusMessage = status) }
             }
@@ -267,10 +313,12 @@ class ListsViewModel(
                 onSuccess = { (added, skipped) ->
                     val msg = if (skipped > 0) "Loaded $added hosts, skip: $skipped (Mini Black)"
                               else "Loaded $added hosts (Mini Black)"
-                    _uiState.update { it.copy(isLoading = false, statusMessage = msg, lastSkipCount = skipped) }
+                    logger.appendLogSync("INFO", msg)
+                    _uiState.update { it.copy(isLoading = false, isListLoading = false, statusMessage = msg, lastSkipCount = skipped) }
                 },
                 onFailure = { error ->
-                    _uiState.update { it.copy(isLoading = false, statusMessage = "Error: ${error.message}", lastError = error.message) }
+                    logger.appendLogSync("ERROR", "Load Mini Black failed: ${error.message}")
+                    _uiState.update { it.copy(isLoading = false, isListLoading = false, statusMessage = "Error: ${error.message}", lastError = error.message) }
                 }
             )
         }
@@ -283,6 +331,7 @@ class ListsViewModel(
             return
         }
 
+        logger.appendLogSync("INFO", "Starting DNS fill")
         dnsJob = viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, isDnsLoading = true, lastError = null) }
             val result = repository.fillDnsIps { current, total ->
@@ -295,6 +344,7 @@ class ListsViewModel(
                     } else {
                         "Resolved $resolved hosts"
                     }
+                    logger.appendLogSync("INFO", "DNS fill complete: $msg")
                     _uiState.update { it.copy(
                         isLoading = false,
                         isDnsLoading = false,
@@ -302,6 +352,7 @@ class ListsViewModel(
                     )}
                 },
                 onFailure = { error ->
+                    logger.appendLogSync("ERROR", "DNS fill failed: ${error.message}")
                     _uiState.update { it.copy(
                         isLoading = false,
                         isDnsLoading = false,
@@ -326,15 +377,18 @@ class ListsViewModel(
     }
 
     fun clearDns() {
+        logger.appendLogSync("INFO", "Clearing all DNS data")
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, statusMessage = "Clearing DNS...", lastError = null) }
             try {
                 repository.clearDns()
+                logger.appendLogSync("INFO", "DNS data cleared")
                 _uiState.update { it.copy(
                     isLoading = false,
                     statusMessage = "DNS cleared"
                 )}
             } catch (e: Exception) {
+                logger.appendLogSync("ERROR", "Clear DNS failed: ${e.message}")
                 _uiState.update { it.copy(
                     isLoading = false,
                     statusMessage = "Error: ${e.message}",
@@ -347,15 +401,18 @@ class ListsViewModel(
 
     // Очистка DNS по списку ID (для Clear DNS по фильтру)
     fun clearDnsByIds(ids: List<String>) {
+        logger.appendLogSync("INFO", "Clearing DNS for ${ids.size} hosts")
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, statusMessage = "Clearing DNS for ${ids.size} hosts...", lastError = null) }
             try {
                 repository.clearDnsByIds(ids)
+                logger.appendLogSync("INFO", "DNS cleared for ${ids.size} hosts")
                 _uiState.update { it.copy(
                     isLoading = false,
                     statusMessage = "DNS cleared for ${ids.size} hosts"
                 )}
             } catch (e: Exception) {
+                logger.appendLogSync("ERROR", "Clear DNS by IDs failed: ${e.message}")
                 _uiState.update { it.copy(
                     isLoading = false,
                     statusMessage = "Error: ${e.message}",
@@ -368,15 +425,18 @@ class ListsViewModel(
 
     // Удаление видимых по фильтру хостов
     fun clearVisibleHosts(hostIds: List<String>) {
+        logger.appendLogSync("INFO", "Deleting ${hostIds.size} visible hosts")
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, statusMessage = "Deleting ${hostIds.size} hosts...", lastError = null) }
             try {
                 repository.deleteByIds(hostIds)
+                logger.appendLogSync("INFO", "Deleted ${hostIds.size} hosts")
                 _uiState.update { it.copy(
                     isLoading = false,
                     statusMessage = "Deleted ${hostIds.size} hosts"
                 )}
             } catch (e: Exception) {
+                logger.appendLogSync("ERROR", "Delete visible hosts failed: ${e.message}")
                 _uiState.update { it.copy(
                     isLoading = false,
                     statusMessage = "Error: ${e.message}",
@@ -395,6 +455,7 @@ class ListsViewModel(
             return
         }
 
+        logger.appendLogSync("INFO", "Starting GeoIP fill${if (hostIds != null) " (${hostIds.size} hosts)" else ""}")
         geoIpJob = viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, isGeoIpLoading = true, lastError = null) }
             val result = repository.fillGeoIp(hostIds) { current, total ->
@@ -407,6 +468,7 @@ class ListsViewModel(
                     } else {
                         "GeoIP: $resolved resolved"
                     }
+                    logger.appendLogSync("INFO", "GeoIP fill complete: $msg")
                     _uiState.update { it.copy(
                         isLoading = false,
                         isGeoIpLoading = false,
@@ -414,6 +476,7 @@ class ListsViewModel(
                     )}
                 },
                 onFailure = { error ->
+                    logger.appendLogSync("ERROR", "GeoIP fill failed: ${error.message}")
                     _uiState.update { it.copy(
                         isLoading = false,
                         isGeoIpLoading = false,
@@ -439,15 +502,18 @@ class ListsViewModel(
 
     // Очистка GeoIP по списку ID (для фильтра)
     fun clearGeoIpByIds(hostIds: List<String>) {
+        logger.appendLogSync("INFO", "Clearing GeoIP for ${hostIds.size} hosts")
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, statusMessage = "Clearing GeoIP for ${hostIds.size} hosts...", lastError = null) }
             try {
                 repository.clearGeoIpByIds(hostIds)
+                logger.appendLogSync("INFO", "GeoIP cleared for ${hostIds.size} hosts")
                 _uiState.update { it.copy(
                     isLoading = false,
                     statusMessage = "GeoIP cleared for ${hostIds.size} hosts"
                 )}
             } catch (e: Exception) {
+                logger.appendLogSync("ERROR", "Clear GeoIP by IDs failed: ${e.message}")
                 _uiState.update { it.copy(
                     isLoading = false,
                     statusMessage = "Error: ${e.message}",
@@ -460,16 +526,19 @@ class ListsViewModel(
 
     // Очистка DNS и GeoIP по списку ID (комбинированная)
     fun clearDnsAndGeoIpByIds(hostIds: List<String>) {
+        logger.appendLogSync("INFO", "Clearing DNS & GeoIP for ${hostIds.size} hosts")
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, statusMessage = "Clearing DNS & GeoIP for ${hostIds.size} hosts...", lastError = null) }
             try {
                 repository.clearDnsByIds(hostIds)
                 repository.clearGeoIpByIds(hostIds)
+                logger.appendLogSync("INFO", "DNS & GeoIP cleared for ${hostIds.size} hosts")
                 _uiState.update { it.copy(
                     isLoading = false,
                     statusMessage = "DNS & GeoIP cleared for ${hostIds.size} hosts"
                 )}
             } catch (e: Exception) {
+                logger.appendLogSync("ERROR", "Clear DNS & GeoIP failed: ${e.message}")
                 _uiState.update { it.copy(
                     isLoading = false,
                     statusMessage = "Error: ${e.message}",
