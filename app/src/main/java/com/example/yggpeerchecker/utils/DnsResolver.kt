@@ -58,18 +58,11 @@ object DnsResolver {
                 return systemResult
             }
 
-            // Проверяем на подмену
+            // Проверяем на подмену (localhost адреса) — НЕ фильтруем, только помечаем
             val isSpoofed = ips.any { it in SPOOFED_IPS }
 
-            // Фильтруем подменённые IP
-            val validIps = if (isSpoofed) {
-                ips.filter { it !in SPOOFED_IPS }
-            } else {
-                ips
-            }
-
             ResolveResult(
-                ips = validIps.take(3),
+                ips = ips.take(5),  // Возвращаем до 5 IP (ip1-ip5), включая localhost для отображения
                 isSpoofed = isSpoofed
             )
         } catch (e: SocketTimeoutException) {
@@ -97,12 +90,11 @@ object DnsResolver {
             val addresses = InetAddress.getAllByName(hostname)
             val ips = addresses.map { it.hostAddress ?: "" }
                 .filter { it.isNotEmpty() }
-                .take(3)
+                .take(5)
 
             val isSpoofed = ips.any { it in SPOOFED_IPS }
-            val validIps = if (isSpoofed) ips.filter { it !in SPOOFED_IPS } else ips
-
-            ResolveResult(validIps, isSpoofed)
+            // Не фильтруем localhost — возвращаем все IP, включая spoofed, для отображения
+            ResolveResult(ips, isSpoofed)
         } catch (e: Exception) {
             ResolveResult(emptyList(), error = e.message)
         }
@@ -256,6 +248,6 @@ object DnsResolver {
      */
     fun getSelectedDnsServer(context: Context): String {
         val prefs = context.getSharedPreferences("ygg_prefs", Context.MODE_PRIVATE)
-        return prefs.getString("dns_server", "77.88.8.8") ?: "77.88.8.8"  // Yandex по умолчанию
+        return prefs.getString("dns_server", "system") ?: "system"  // System DNS по умолчанию
     }
 }

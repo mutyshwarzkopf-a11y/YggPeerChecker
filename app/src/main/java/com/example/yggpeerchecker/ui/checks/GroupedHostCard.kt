@@ -24,10 +24,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.yggpeerchecker.R
 import com.example.yggpeerchecker.data.AddressType
 import com.example.yggpeerchecker.data.EndpointCheckResult
 import com.example.yggpeerchecker.data.GroupedHost
@@ -185,11 +187,10 @@ private fun AddressRow(addr: HostAddress) {
     // Определяем тип адреса для визуального отличия
     val isHst = addr.type == AddressType.HST
     val isIp0 = addr.type == AddressType.IP0  // Текущий резолвленный IP (отличается от кэшированных)
-    val isFallback = !isHst && !isIp0  // ip1, ip2, ip3
-    // Обнаружение DNS spoofing (localhost адреса)
-    val isSpoofed = isIp0 && addr.address.lowercase().trim() in setOf(
-        "127.0.0.1", "0.0.0.0", "::1", "localhost", "127.0.0.0", "0:0:0:0:0:0:0:1"
-    )
+    val isFallback = !isHst && !isIp0  // ip1-ip5
+    // Обнаружение DNS spoofing (localhost адреса) — для любого типа IP
+    val localhostSet = setOf("127.0.0.1", "0.0.0.0", "::1", "localhost", "127.0.0.0", "0:0:0:0:0:0:0:1")
+    val isSpoofed = (isIp0 || isFallback) && addr.address.lowercase().trim() in localhostSet
 
     Row(
         modifier = Modifier
@@ -228,6 +229,11 @@ private fun AddressRow(addr: HostAddress) {
                     else -> MaterialTheme.colorScheme.onSurface
                 }
             )
+            // Иконка DNS сервера-источника (для ip1-ip5)
+            if (addr.dnsSource != null && isFallback) {
+                Spacer(modifier = Modifier.width(2.dp))
+                DnsSourceIndicator(addr.dnsSource)
+            }
             // Индикатор DNS spoofing
             if (isSpoofed) {
                 Text(
@@ -339,6 +345,41 @@ private fun EndpointRow(
                 modifier = Modifier.padding(start = 4.dp)
             )
         }
+    }
+}
+
+/**
+ * Индикатор DNS сервера-источника рядом с IP адресом
+ */
+@Composable
+private fun DnsSourceIndicator(source: String) {
+    when (source.lowercase()) {
+        "yandex" -> androidx.compose.foundation.Image(
+            painter = painterResource(R.drawable.ic_dns_yandex),
+            contentDescription = "Yandex DNS",
+            modifier = Modifier.size(12.dp)
+        )
+        "cloudflare" -> androidx.compose.foundation.Image(
+            painter = painterResource(R.drawable.ic_dns_cloudflare),
+            contentDescription = "Cloudflare DNS",
+            modifier = Modifier.size(12.dp)
+        )
+        "google" -> androidx.compose.foundation.Image(
+            painter = painterResource(R.drawable.ic_dns_google),
+            contentDescription = "Google DNS",
+            modifier = Modifier.size(12.dp)
+        )
+        "system" -> androidx.compose.foundation.Image(
+            painter = painterResource(R.drawable.ic_dns_system),
+            contentDescription = "System DNS",
+            modifier = Modifier.size(12.dp)
+        )
+        else -> Text(
+            text = "($source)",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 8.sp
+        )
     }
 }
 

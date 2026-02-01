@@ -74,17 +74,25 @@ interface HostDao {
     @Query("UPDATE hosts SET dnsIp1 = :ip1, dnsIp2 = :ip2, dnsIp3 = :ip3, dnsTimestamp = :timestamp WHERE id = :hostId")
     suspend fun updateDnsIps(hostId: String, ip1: String?, ip2: String?, ip3: String?, timestamp: Long)
 
+    // Обновление всех 5 IP + DNS sources
+    @Query("UPDATE hosts SET dnsIp1 = :ip1, dnsIp2 = :ip2, dnsIp3 = :ip3, dnsIp4 = :ip4, dnsIp5 = :ip5, dnsSource1 = :src1, dnsSource2 = :src2, dnsSource3 = :src3, dnsSource4 = :src4, dnsSource5 = :src5, dnsTimestamp = :timestamp WHERE id = :hostId")
+    suspend fun updateDnsIpsFull(hostId: String, ip1: String?, ip2: String?, ip3: String?, ip4: String?, ip5: String?, src1: String?, src2: String?, src3: String?, src4: String?, src5: String?, timestamp: Long)
+
     // Очищаем DNS только для хостов где address != dnsIp1 (т.е. не чистые IP)
-    @Query("UPDATE hosts SET dnsIp1 = NULL, dnsIp2 = NULL, dnsIp3 = NULL, dnsTimestamp = NULL WHERE address != dnsIp1 OR dnsIp1 IS NULL")
+    @Query("UPDATE hosts SET dnsIp1 = NULL, dnsIp2 = NULL, dnsIp3 = NULL, dnsIp4 = NULL, dnsIp5 = NULL, dnsSource1 = NULL, dnsSource2 = NULL, dnsSource3 = NULL, dnsSource4 = NULL, dnsSource5 = NULL, dnsTimestamp = NULL WHERE address != dnsIp1 OR dnsIp1 IS NULL")
     suspend fun clearAllDns()
 
     // Очистить DNS только для резолвленных (не чистых IP)
-    @Query("UPDATE hosts SET dnsIp1 = NULL, dnsIp2 = NULL, dnsIp3 = NULL, dnsTimestamp = NULL WHERE dnsTimestamp IS NOT NULL")
+    @Query("UPDATE hosts SET dnsIp1 = NULL, dnsIp2 = NULL, dnsIp3 = NULL, dnsIp4 = NULL, dnsIp5 = NULL, dnsSource1 = NULL, dnsSource2 = NULL, dnsSource3 = NULL, dnsSource4 = NULL, dnsSource5 = NULL, dnsTimestamp = NULL WHERE dnsTimestamp IS NOT NULL")
     suspend fun clearResolvedDns()
 
     // Очистить DNS по списку ID (для Clear DNS по фильтру)
-    @Query("UPDATE hosts SET dnsIp1 = NULL, dnsIp2 = NULL, dnsIp3 = NULL, dnsTimestamp = NULL WHERE id IN (:ids)")
+    @Query("UPDATE hosts SET dnsIp1 = NULL, dnsIp2 = NULL, dnsIp3 = NULL, dnsIp4 = NULL, dnsIp5 = NULL, dnsSource1 = NULL, dnsSource2 = NULL, dnsSource3 = NULL, dnsSource4 = NULL, dnsSource5 = NULL, dnsTimestamp = NULL WHERE id IN (:ids)")
     suspend fun clearDnsByIds(ids: List<String>)
+
+    // Получение хостов с пустыми IP слотами (для DNS++)
+    @Query("SELECT * FROM hosts WHERE (dnsIp1 IS NULL OR dnsIp2 IS NULL OR dnsIp3 IS NULL OR dnsIp4 IS NULL OR dnsIp5 IS NULL) AND address NOT LIKE '%[0-9].[0-9]%'")
+    suspend fun getHostsWithEmptyDnsSlots(): List<Host>
 
     @Query("SELECT COUNT(*) FROM hosts")
     suspend fun getHostCount(): Int

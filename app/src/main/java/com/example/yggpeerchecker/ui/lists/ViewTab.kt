@@ -17,6 +17,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.Image
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
@@ -27,6 +29,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -46,6 +50,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.painterResource
+import com.example.yggpeerchecker.R
 import com.example.yggpeerchecker.data.database.Host
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -130,34 +136,116 @@ fun ViewTab(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 1. Fill DNS - с возможностью отмены
-            OutlinedButton(
-                onClick = { viewModel.fillDnsIps() },
-                enabled = uiState.isDnsLoading || (!uiState.isLoading && uiState.totalCount > 0),
-                modifier = Modifier.height(32.dp),
-                contentPadding = PaddingValues(horizontal = 10.dp),
-                colors = if (uiState.isDnsLoading) {
-                    ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                } else {
-                    ButtonDefaults.outlinedButtonColors()
+            // 1. Fill DNS — dropdown с выбором сервера или Cancel
+            var showDnsDropdown by remember { mutableStateOf(false) }
+            Box {
+                OutlinedButton(
+                    onClick = {
+                        if (uiState.isDnsLoading) {
+                            viewModel.cancelDns()
+                        } else {
+                            showDnsDropdown = true
+                        }
+                    },
+                    enabled = uiState.isDnsLoading || (!uiState.isLoading && uiState.totalCount > 0),
+                    modifier = Modifier.height(32.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp),
+                    colors = if (uiState.isDnsLoading) {
+                        ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    } else {
+                        ButtonDefaults.outlinedButtonColors()
+                    }
+                ) {
+                    if (uiState.isDnsLoading) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Cancel",
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Cancel", fontSize = 11.sp)
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Dns,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text("DNS", fontSize = 11.sp)
+                        Icon(
+                            imageVector = Icons.Default.ArrowDropDown,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                 }
-            ) {
-                if (uiState.isDnsLoading) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Cancel",
-                        modifier = Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.error
+                // Выпадающий список серверов
+                DropdownMenu(
+                    expanded = showDnsDropdown,
+                    onDismissRequest = { showDnsDropdown = false }
+                ) {
+                    // Yandex
+                    DropdownMenuItem(
+                        text = { Text("Yandex (77.88.8.8)") },
+                        onClick = {
+                            showDnsDropdown = false
+                            viewModel.fillDnsFromServer("77.88.8.8", "yandex")
+                        },
+                        leadingIcon = {
+                            Image(
+                                painter = painterResource(R.drawable.ic_dns_yandex),
+                                contentDescription = "Yandex",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.Dns,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp)
+                    // Cloudflare
+                    DropdownMenuItem(
+                        text = { Text("Cloudflare (1.1.1.1)") },
+                        onClick = {
+                            showDnsDropdown = false
+                            viewModel.fillDnsFromServer("1.1.1.1", "cloudflare")
+                        },
+                        leadingIcon = {
+                            Image(
+                                painter = painterResource(R.drawable.ic_dns_cloudflare),
+                                contentDescription = "Cloudflare",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    )
+                    // Google
+                    DropdownMenuItem(
+                        text = { Text("Google (8.8.8.8)") },
+                        onClick = {
+                            showDnsDropdown = false
+                            viewModel.fillDnsFromServer("8.8.8.8", "google")
+                        },
+                        leadingIcon = {
+                            Image(
+                                painter = painterResource(R.drawable.ic_dns_google),
+                                contentDescription = "Google",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    )
+                    // System
+                    DropdownMenuItem(
+                        text = { Text("System DNS") },
+                        onClick = {
+                            showDnsDropdown = false
+                            viewModel.fillDnsFromServer("system", "system")
+                        },
+                        leadingIcon = {
+                            Image(
+                                painter = painterResource(R.drawable.ic_dns_system),
+                                contentDescription = "System",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     )
                 }
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(if (uiState.isDnsLoading) "Cancel" else "DNS", fontSize = 11.sp)
             }
 
             // 2. Fill GeoIP - счетчик показывает ВСЕ хосты без GeoIP
@@ -363,7 +451,9 @@ private fun isIpv6Host(host: Host): Boolean {
     // Резолвленные DNS IP - IPv6 (содержат двоеточия)
     if (host.dnsIp1?.contains(":") == true ||
         host.dnsIp2?.contains(":") == true ||
-        host.dnsIp3?.contains(":") == true) {
+        host.dnsIp3?.contains(":") == true ||
+        host.dnsIp4?.contains(":") == true ||
+        host.dnsIp5?.contains(":") == true) {
         return true
     }
 
@@ -380,6 +470,8 @@ private fun isIpv4Host(host: Host): Boolean {
     if (host.dnsIp1 != null && ipv4Regex.matches(host.dnsIp1)) return true
     if (host.dnsIp2 != null && ipv4Regex.matches(host.dnsIp2)) return true
     if (host.dnsIp3 != null && ipv4Regex.matches(host.dnsIp3)) return true
+    if (host.dnsIp4 != null && ipv4Regex.matches(host.dnsIp4)) return true
+    if (host.dnsIp5 != null && ipv4Regex.matches(host.dnsIp5)) return true
     return false
 }
 
@@ -513,9 +605,15 @@ private fun HostItem(host: Host) {
                 overflow = TextOverflow.Ellipsis
             )
 
-            // DNS IP - дата резолва отдельной строкой, затем только заполненные адреса
-            val dnsIps = listOfNotNull(host.dnsIp1, host.dnsIp2, host.dnsIp3)
-            if (dnsIps.isNotEmpty()) {
+            // DNS IP - дата резолва отдельной строкой, затем заполненные адреса с иконками DNS-источника
+            val dnsIpEntries = listOfNotNull(
+                host.dnsIp1?.let { Triple(it, host.dnsSource1, 1) },
+                host.dnsIp2?.let { Triple(it, host.dnsSource2, 2) },
+                host.dnsIp3?.let { Triple(it, host.dnsSource3, 3) },
+                host.dnsIp4?.let { Triple(it, host.dnsSource4, 4) },
+                host.dnsIp5?.let { Triple(it, host.dnsSource5, 5) }
+            )
+            if (dnsIpEntries.isNotEmpty()) {
                 Column(
                     modifier = Modifier.padding(top = 4.dp)
                 ) {
@@ -529,14 +627,21 @@ private fun HostItem(host: Host) {
                         )
                     }
 
-                    // Только заполненные IP
-                    dnsIps.forEachIndexed { index, ip ->
-                        Text(
-                            text = "IP${index + 1}: $ip",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            fontFamily = FontFamily.Monospace
-                        )
+                    // IP с иконками DNS-источника
+                    dnsIpEntries.forEach { (ip, source, idx) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "IP$idx: $ip",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            // Иконка DNS-источника
+                            DnsSourceIcon(source)
+                        }
                     }
                 }
             }
@@ -580,6 +685,42 @@ private fun formatSource(source: String): String {
         source == "file" -> "file"
         source.startsWith("file:") -> source.substringAfter("file:").take(15)
         else -> source.take(15)
+    }
+}
+
+/**
+ * Иконка DNS-источника (yandex/cloudflare/google/system или кастомный IP)
+ */
+@Composable
+private fun DnsSourceIcon(source: String?) {
+    if (source.isNullOrEmpty()) return
+    when (source.lowercase()) {
+        "yandex" -> Image(
+            painter = painterResource(R.drawable.ic_dns_yandex),
+            contentDescription = "Yandex DNS",
+            modifier = Modifier.size(14.dp)
+        )
+        "cloudflare" -> Image(
+            painter = painterResource(R.drawable.ic_dns_cloudflare),
+            contentDescription = "Cloudflare DNS",
+            modifier = Modifier.size(14.dp)
+        )
+        "google" -> Image(
+            painter = painterResource(R.drawable.ic_dns_google),
+            contentDescription = "Google DNS",
+            modifier = Modifier.size(14.dp)
+        )
+        "system" -> Image(
+            painter = painterResource(R.drawable.ic_dns_system),
+            contentDescription = "System DNS",
+            modifier = Modifier.size(14.dp)
+        )
+        else -> Text(
+            text = "($source)",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 9.sp
+        )
     }
 }
 

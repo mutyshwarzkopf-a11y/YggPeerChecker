@@ -1,11 +1,15 @@
 package com.example.yggpeerchecker.ui.system
 
+import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.widget.Toast
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -21,12 +25,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ButtonDefaults
@@ -49,8 +49,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.res.painterResource
+import com.example.yggpeerchecker.R
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -93,6 +97,9 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
     // Состояние для проверки обновлений
     var isCheckingUpdate by remember { mutableStateOf(false) }
     var updateStatus by remember { mutableStateOf("") }
+    var latestVersion by remember { mutableStateOf("") }
+    var downloadUrl by remember { mutableStateOf("") }
+    var showDownloadDialog by remember { mutableStateOf(false) }
 
     // Concurrent streams
     var concurrentStreams by remember {
@@ -109,12 +116,17 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
         mutableStateOf(prefs.getBoolean("check_interfaces", true))
     }
 
-    // DNS Settings
+    // Ping count (1-5)
+    var pingCount by remember {
+        mutableFloatStateOf(prefs.getInt("ping_count", 1).toFloat())
+    }
+
+    // DNS Settings — дефолт system, влияет только на Checks
     var selectedDns by remember {
-        mutableStateOf(prefs.getString("dns_server", DnsServers.YANDEX) ?: DnsServers.YANDEX)
+        mutableStateOf(prefs.getString("dns_server", DnsServers.SYSTEM) ?: DnsServers.SYSTEM)
     }
     var customDns by remember {
-        mutableStateOf(prefs.getString("custom_dns", "") ?: "")
+        mutableStateOf(prefs.getString("dns_server", DnsServers.SYSTEM) ?: DnsServers.SYSTEM)
     }
     var systemDns by remember { mutableStateOf("") }
 
@@ -218,11 +230,41 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
                         }
                     )
                 }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Ping count slider
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Ping count:")
+                    Text(
+                        text = "${pingCount.roundToInt()}",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Slider(
+                    value = pingCount,
+                    onValueChange = { newValue ->
+                        pingCount = newValue
+                        prefs.edit().putInt("ping_count", newValue.roundToInt()).apply()
+                    },
+                    valueRange = 1f..5f,
+                    steps = 3,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = "Number of ping packets (1-5). Higher = more accurate avg RTT",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 
-        // DNS Settings section
-        @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+        // DNS Settings — влияет на резолв при Checks проверках
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
@@ -230,75 +272,109 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
                     style = MaterialTheme.typography.titleMedium
                 )
                 Text(
-                    text = "DNS server for hostname resolution (app only)",
+                    text = "DNS server for Checks resolution",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Чипы с DNS серверами (компактно в одну строку)
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    DnsChip(
-                        label = "Yandex",
-                        ip = DnsServers.YANDEX,
-                        icon = Icons.Default.Shield,
-                        isSelected = selectedDns == DnsServers.YANDEX,
-                        onClick = {
-                            selectedDns = DnsServers.YANDEX
-                            customDns = DnsServers.YANDEX
-                            prefs.edit().putString("dns_server", DnsServers.YANDEX).apply()
+                // Вертикальный список DNS серверов с иконками и IP
+                val dnsServers = listOf(
+                    Triple("Yandex", DnsServers.YANDEX, R.drawable.ic_dns_yandex),
+                    Triple("Cloudflare", DnsServers.CLOUDFLARE, R.drawable.ic_dns_cloudflare),
+                    Triple("Google", DnsServers.GOOGLE, R.drawable.ic_dns_google)
+                )
+                dnsServers.forEach { (name, ip, iconRes) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                selectedDns = ip
+                                customDns = ip
+                                prefs.edit().putString("dns_server", ip).apply()
+                            }
+                            .padding(vertical = 6.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Image(
+                            painter = painterResource(iconRes),
+                            contentDescription = name,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Text(
+                            text = ip,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = name,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selectedDns == ip)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (selectedDns == ip) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Selected",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
                         }
-                    )
-                    DnsChip(
-                        label = "Google",
-                        ip = DnsServers.GOOGLE,
-                        icon = Icons.Default.Language,
-                        isSelected = selectedDns == DnsServers.GOOGLE,
-                        onClick = {
-                            selectedDns = DnsServers.GOOGLE
-                            customDns = DnsServers.GOOGLE
-                            prefs.edit().putString("dns_server", DnsServers.GOOGLE).apply()
-                        }
-                    )
-                    DnsChip(
-                        label = "Cloudflare",
-                        ip = DnsServers.CLOUDFLARE,
-                        icon = Icons.Default.Cloud,
-                        isSelected = selectedDns == DnsServers.CLOUDFLARE,
-                        onClick = {
-                            selectedDns = DnsServers.CLOUDFLARE
-                            customDns = DnsServers.CLOUDFLARE
-                            prefs.edit().putString("dns_server", DnsServers.CLOUDFLARE).apply()
-                        }
-                    )
-                    DnsChip(
-                        label = "System",
-                        ip = if (systemDns.isNotEmpty()) systemDns else "detect",
-                        icon = Icons.Default.Settings,
-                        isSelected = systemDns.isNotEmpty() && selectedDns == systemDns,
-                        onClick = {
-                            // Получаем системный DNS
+                    }
+                }
+                // System DNS — отдельная строка
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
                             val detected = getSystemDns(context)
                             if (detected.isNotEmpty()) {
                                 systemDns = detected
-                                selectedDns = detected
-                                customDns = detected
-                                prefs.edit().putString("dns_server", detected).apply()
-                                Toast.makeText(context, "System DNS: $detected", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "Could not detect system DNS", Toast.LENGTH_SHORT).show()
                             }
+                            selectedDns = DnsServers.SYSTEM
+                            customDns = if (systemDns.isNotEmpty()) systemDns else DnsServers.SYSTEM
+                            prefs.edit().putString("dns_server", DnsServers.SYSTEM).apply()
                         }
+                        .padding(vertical = 6.dp, horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Image(
+                        painter = painterResource(R.drawable.ic_dns_system),
+                        contentDescription = "System",
+                        modifier = Modifier.size(22.dp)
                     )
+                    Text(
+                        text = if (systemDns.isNotEmpty()) systemDns else "auto-detect",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = "System",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (selectedDns == DnsServers.SYSTEM)
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (selectedDns == DnsServers.SYSTEM) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Selected",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Поле DNS адреса + кнопка Set
+                // Поле DNS адреса + кнопка Set (можно ввести custom IP)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -315,7 +391,7 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
                     Button(
                         onClick = {
                             val ip = customDns.trim()
-                            if (ip.matches(Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"""))) {
+                            if (ip == DnsServers.SYSTEM || ip.matches(Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"""))) {
                                 selectedDns = ip
                                 prefs.edit().putString("dns_server", ip).apply()
                                 Toast.makeText(context, "DNS set: $ip", Toast.LENGTH_SHORT).show()
@@ -440,7 +516,7 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
                             updateStatus = "Checking..."
                             scope.launch {
                                 try {
-                                    val result = withContext(Dispatchers.IO) {
+                                    val checkResult = withContext(Dispatchers.IO) {
                                         val url = java.net.URL(GITHUB_RELEASES_API)
                                         val conn = url.openConnection() as java.net.HttpURLConnection
                                         conn.requestMethod = "GET"
@@ -455,26 +531,43 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
                                             val releases = JSONArray(response)
                                             if (releases.length() > 0) {
                                                 val latest = releases.getJSONObject(0)
-                                                latest.getString("tag_name").removePrefix("v")
-                                            } else "no_releases"
+                                                val version = latest.getString("tag_name").removePrefix("v")
+                                                // Ищем APK в assets релиза
+                                                val assets = latest.optJSONArray("assets")
+                                                var apkUrl = ""
+                                                if (assets != null) {
+                                                    for (i in 0 until assets.length()) {
+                                                        val asset = assets.getJSONObject(i)
+                                                        val name = asset.optString("name", "")
+                                                        if (name.endsWith(".apk")) {
+                                                            apkUrl = asset.optString("browser_download_url", "")
+                                                            break
+                                                        }
+                                                    }
+                                                }
+                                                Triple(version, apkUrl, "")
+                                            } else Triple("", "", "no_releases")
                                         } else {
-                                            "http_$responseCode"
+                                            Triple("", "", "http_$responseCode")
                                         }
                                     }
 
+                                    val (version, apkUrl, error) = checkResult
                                     when {
-                                        result == "no_releases" -> {
+                                        error == "no_releases" -> {
                                             updateStatus = "No releases yet (v$CURRENT_VERSION is dev)"
                                         }
-                                        result.startsWith("http_") -> {
-                                            updateStatus = "GitHub API error: ${result.removePrefix("http_")}"
+                                        error.startsWith("http_") -> {
+                                            updateStatus = "GitHub API error: ${error.removePrefix("http_")}"
                                         }
-                                        compareVersions(result, CURRENT_VERSION) > 0 -> {
-                                            updateStatus = "New: v$result (current: v$CURRENT_VERSION)"
-                                            Toast.makeText(context, "Update available: v$result", Toast.LENGTH_LONG).show()
+                                        version.isNotEmpty() && compareVersions(version, CURRENT_VERSION) > 0 -> {
+                                            updateStatus = "New: v$version (current: v$CURRENT_VERSION)"
+                                            latestVersion = version
+                                            downloadUrl = apkUrl
+                                            showDownloadDialog = true
                                         }
-                                        compareVersions(result, CURRENT_VERSION) < 0 -> {
-                                            updateStatus = "Dev version (latest release: v$result)"
+                                        version.isNotEmpty() && compareVersions(version, CURRENT_VERSION) < 0 -> {
+                                            updateStatus = "Dev version (latest release: v$version)"
                                         }
                                         else -> {
                                             updateStatus = "Up to date (v$CURRENT_VERSION)"
@@ -527,6 +620,56 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
                 }
             }
         }
+
+        // Диалог скачивания обновления
+        if (showDownloadDialog) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showDownloadDialog = false },
+                title = { Text("Update Available") },
+                text = {
+                    Text("Version v$latestVersion is available.\nCurrent: v$CURRENT_VERSION\n\n" +
+                        if (downloadUrl.isNotEmpty()) "Download and install?" else "No APK found in release. Open GitHub?")
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        showDownloadDialog = false
+                        if (downloadUrl.isNotEmpty()) {
+                            // Скачиваем APK через DownloadManager
+                            try {
+                                val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                                val request = DownloadManager.Request(Uri.parse(downloadUrl))
+                                    .setTitle("YggPeerChecker v$latestVersion")
+                                    .setDescription("Downloading update...")
+                                    .setDestinationInExternalPublicDir(
+                                        Environment.DIRECTORY_DOWNLOADS,
+                                        "YggPeerChecker-v$latestVersion.apk"
+                                    )
+                                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                    .setMimeType("application/vnd.android.package-archive")
+                                dm.enqueue(request)
+                                Toast.makeText(context, "Download started. Check notifications.", Toast.LENGTH_LONG).show()
+                                updateStatus = "Downloading v$latestVersion..."
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                                // Fallback — открываем в браузере
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(downloadUrl)))
+                            }
+                        } else {
+                            // Нет APK — открываем страницу релиза
+                            context.startActivity(Intent(Intent.ACTION_VIEW,
+                                Uri.parse("https://github.com/mutyshwarzkopf-a11y/YggPeerChecker/releases")))
+                        }
+                    }) {
+                        Text(if (downloadUrl.isNotEmpty()) "Download" else "Open GitHub")
+                    }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { showDownloadDialog = false }) {
+                        Text("Later")
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -545,13 +688,13 @@ private fun compareVersions(v1: String, v2: String): Int {
     return 0
 }
 
-// Компактный чип DNS сервера с иконкой (влезает в одну строку)
+// Компактный чип DNS сервера с иконкой из drawable ресурсов
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DnsChip(
     label: String,
     @Suppress("UNUSED_PARAMETER") ip: String,
-    icon: ImageVector,
+    iconPainter: Painter,
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
@@ -560,10 +703,10 @@ private fun DnsChip(
         onClick = onClick,
         label = { Text(label, fontSize = 10.sp, maxLines = 1) },
         leadingIcon = {
-            Icon(
-                imageVector = icon,
+            androidx.compose.foundation.Image(
+                painter = iconPainter,
                 contentDescription = null,
-                modifier = Modifier.size(12.dp)
+                modifier = Modifier.size(14.dp)
             )
         },
         modifier = Modifier.height(28.dp),

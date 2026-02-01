@@ -364,6 +364,80 @@ class ListsViewModel(
         }
     }
 
+    /**
+     * DNS fill с выбранного сервера (замена DNS++ кнопки — теперь через dropdown)
+     */
+    fun fillDnsFromServer(serverIp: String, serverName: String) {
+        if (_uiState.value.isDnsLoading) {
+            cancelDns()
+            return
+        }
+
+        logger.appendLogSync("INFO", "Starting DNS fill from $serverName ($serverIp)")
+        dnsJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, isDnsLoading = true, lastError = null) }
+            val result = repository.fillDnsFromServer(serverIp, serverName) { current, total ->
+                _uiState.update { it.copy(statusMessage = "DNS ($serverName): $current/$total") }
+            }
+            result.fold(
+                onSuccess = { (filled, skipped) ->
+                    val msg = "DNS ($serverName): $filled IPs filled" +
+                        if (skipped > 0) " (skipped $skipped)" else ""
+                    logger.appendLogSync("INFO", msg)
+                    _uiState.update { it.copy(
+                        isLoading = false,
+                        isDnsLoading = false,
+                        statusMessage = msg
+                    )}
+                },
+                onFailure = { error ->
+                    logger.appendLogSync("ERROR", "DNS fill from $serverName failed: ${error.message}")
+                    _uiState.update { it.copy(
+                        isLoading = false,
+                        isDnsLoading = false,
+                        statusMessage = "DNS error: ${error.message}",
+                        lastError = error.message
+                    )}
+                }
+            )
+        }
+    }
+
+    // DNS++ — дозаполнение ip1-ip5 со всех DNS серверов (оставлен для обратной совместимости)
+    fun fillDnsFromAllServers() {
+        if (_uiState.value.isDnsLoading) {
+            cancelDns()
+            return
+        }
+
+        logger.appendLogSync("INFO", "Starting DNS++ fill from all servers")
+        dnsJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, isDnsLoading = true, lastError = null) }
+            val result = repository.fillDnsFromAllServers { status, filled, total ->
+                _uiState.update { it.copy(statusMessage = "DNS++: $status ($filled filled)") }
+            }
+            result.fold(
+                onSuccess = { filledCount ->
+                    logger.appendLogSync("INFO", "DNS++ complete: $filledCount IPs filled")
+                    _uiState.update { it.copy(
+                        isLoading = false,
+                        isDnsLoading = false,
+                        statusMessage = "DNS++: $filledCount new IPs filled"
+                    )}
+                },
+                onFailure = { error ->
+                    logger.appendLogSync("ERROR", "DNS++ failed: ${error.message}")
+                    _uiState.update { it.copy(
+                        isLoading = false,
+                        isDnsLoading = false,
+                        statusMessage = "DNS++ error: ${error.message}",
+                        lastError = error.message
+                    )}
+                }
+            )
+        }
+    }
+
     // Отмена DNS операции
     fun cancelDns() {
         dnsJob?.cancel()

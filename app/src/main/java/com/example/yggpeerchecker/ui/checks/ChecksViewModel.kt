@@ -145,7 +145,9 @@ data class ChecksUiState(
     val tracertProgress: Int = 0,
     // Группировка
     val groupedHosts: List<GroupedHost> = emptyList(),
-    val selectedEndpoints: Set<String> = emptySet()  // Выбранные endpoint URLs для копирования
+    val selectedEndpoints: Set<String> = emptySet(),  // Выбранные endpoint URLs для копирования
+    // Быстрый фильтр результатов по подстроке
+    val searchQuery: String = ""
 )
 
 class ChecksViewModel(
@@ -174,9 +176,9 @@ class ChecksViewModel(
         val enabledTypes = if (savedTypes != null) {
             savedTypes.mapNotNull { name ->
                 try { CheckType.valueOf(name) } catch (e: Exception) { null }
-            }.toSet() + CheckType.PING  // PING всегда активен
+            }.toSet()
         } else {
-            setOf(CheckType.PING, CheckType.YGG_RTT)  // default
+            setOf(CheckType.PING, CheckType.YGG_RTT)  // default: Ping включён
         }
 
         val fastMode = checksPrefs.getBoolean("fast_mode", false)
@@ -391,9 +393,6 @@ class ChecksViewModel(
     }
 
     fun toggleCheckType(type: CheckType) {
-        // PING нельзя отключить - всегда активен
-        if (type == CheckType.PING) return
-
         _uiState.update { state ->
             val newTypes = if (state.enabledCheckTypes.contains(type)) {
                 state.enabledCheckTypes - type
@@ -431,6 +430,10 @@ class ChecksViewModel(
     fun setFilterMs(ms: Int) {
         _uiState.update { it.copy(filterMs = ms) }
         saveChecksPrefs()
+    }
+
+    fun setSearchQuery(query: String) {
+        _uiState.update { it.copy(searchQuery = query) }
     }
 
     private fun sortPeers() {
@@ -639,16 +642,14 @@ class ChecksViewModel(
                         logger.appendLogSync("WARN", "DNS resolved ${host.address} -> localhost ($firstIp), marking as X")
                     }
 
-                    // ip0: показываем текущий резолвленный IP если отличается от кэшированных
-                    // Включая localhost/spoofed — пользователь должен видеть подмену
-                    val cachedIps = listOfNotNull(host.dnsIp1, host.dnsIp2, host.dnsIp3)
-                    if (cachedIps.isEmpty() || firstIp !in cachedIps) {
-                        currentResolvedIp = firstIp
-                        if (resolvedIsLocalhost) {
-                            logger.appendLogSync("WARN", "ip0 SPOOFED for ${host.address}: $firstIp (cached: ${cachedIps.joinToString().ifEmpty { "none" }})")
-                        } else {
-                            logger.appendLogSync("INFO", "ip0 for ${host.address}: $firstIp (cached: ${cachedIps.joinToString().ifEmpty { "none" }})")
-                        }
+                    // ip0: всегда показываем текущий резолвленный IP для hostname-хостов
+                    // Пользователь видит какой IP резолвится прямо сейчас (актуальная картина)
+                    currentResolvedIp = firstIp
+                    val cachedIps = listOfNotNull(host.dnsIp1, host.dnsIp2, host.dnsIp3, host.dnsIp4, host.dnsIp5)
+                    if (resolvedIsLocalhost) {
+                        logger.appendLogSync("WARN", "ip0 SPOOFED for ${host.address}: $firstIp (cached: ${cachedIps.joinToString().ifEmpty { "none" }})")
+                    } else {
+                        logger.appendLogSync("DEBUG", "ip0 for ${host.address}: $firstIp (cached: ${cachedIps.joinToString().ifEmpty { "none" }})")
                     }
                 } else if (resolveResult.isSpoofed) {
                     // DNS подменён и валидных IP нет
@@ -663,11 +664,8 @@ class ChecksViewModel(
                             logger.appendLogSync("WARN", "System DNS resolved ${host.address} -> $sysIp (localhost)")
                         } else if (sysIp != null) {
                             // Системный резолв дал не-localhost IP - показываем как ip0
-                            val cachedIps = listOfNotNull(host.dnsIp1, host.dnsIp2, host.dnsIp3)
-                            if (cachedIps.isEmpty() || sysIp !in cachedIps) {
-                                currentResolvedIp = sysIp
-                                logger.appendLogSync("INFO", "ip0 (sys fallback) for ${host.address}: $sysIp")
-                            }
+                            currentResolvedIp = sysIp
+                            logger.appendLogSync("DEBUG", "ip0 (sys fallback) for ${host.address}: $sysIp")
                         }
                     } catch (e: Exception) {
                         logger.appendLogSync("DEBUG", "System resolve also failed for ${host.address}: ${e.message}")
@@ -713,7 +711,7 @@ class ChecksViewModel(
         results.add(mergedMain)
 
         // DNS IP адреса
-        val allDnsIps = listOfNotNull(host.dnsIp1, host.dnsIp2, host.dnsIp3)
+        val allDnsIps = listOfNotNull(host.dnsIp1, host.dnsIp2, host.dnsIp3, host.dnsIp4, host.dnsIp5)
             .filter { it != host.address && it.isNotEmpty() }
 
         // Quick Mode (fastMode + !alwaysCheckDns): только первый DNS IP
@@ -818,6 +816,17 @@ class ChecksViewModel(
         return address.lowercase().trim() in LOCALHOST_ADDRESSES
     }
 
+    // Извлечение хоста/IP из target URL (например "sni://1.2.3.4:443" → "1.2.3.4")
+    private fun extractHostFromTarget(target: String): String {
+        return target
+            .substringAfter("://", target)
+            .removePrefix("[").removeSuffix("]")  // IPv6 скобки
+            .substringBefore(":")
+            .substringBefore("/")
+            .substringBefore("?")
+            .lowercase().trim()
+    }
+
     private suspend fun checkSingleTarget(
         target: String,
         port: Int?,
@@ -875,7 +884,9 @@ class ChecksViewModel(
             // PING
             if (enabledTypes.contains(CheckType.PING)) {
                 logger.appendLogSync("DEBUG", "Ping check: $target")
-                val ping = PingUtil.ping(target, 3000)
+                val pingCount = context.getSharedPreferences("ygg_prefs", Context.MODE_PRIVATE)
+                    .getInt("ping_count", 1)
+                val ping = PingUtil.ping(target, 3000, pingCount)
                 if (ping >= 0) {
                     pingTime = ping.toLong()
                     available = true
@@ -1489,19 +1500,19 @@ class ChecksViewModel(
             type = AddressType.HST
         ))
 
-        // DNS IP адреса (уникальные)
-        val dnsIps = hosts.flatMap { host ->
-            listOfNotNull(host.dnsIp1, host.dnsIp2, host.dnsIp3)
-        }.distinct().filter { it != firstHost.address }
+        // DNS IP адреса (уникальные) + источники
+        val dnsIpList = listOfNotNull(
+            firstHost.dnsIp1?.let { it to firstHost.dnsSource1 },
+            firstHost.dnsIp2?.let { it to firstHost.dnsSource2 },
+            firstHost.dnsIp3?.let { it to firstHost.dnsSource3 },
+            firstHost.dnsIp4?.let { it to firstHost.dnsSource4 },
+            firstHost.dnsIp5?.let { it to firstHost.dnsSource5 }
+        ).filter { it.first != firstHost.address }
 
-        dnsIps.forEachIndexed { index, ip ->
-            val type = when (index) {
-                0 -> AddressType.IP1
-                1 -> AddressType.IP2
-                else -> AddressType.IP3
-            }
-            if (index < 3) {
-                addresses.add(HostAddress(address = ip, type = type))
+        val ipTypes = listOf(AddressType.IP1, AddressType.IP2, AddressType.IP3, AddressType.IP4, AddressType.IP5)
+        dnsIpList.forEachIndexed { index, (ip, source) ->
+            if (index < 5) {
+                addresses.add(HostAddress(address = ip, type = ipTypes[index], dnsSource = source))
             }
         }
 
@@ -1593,8 +1604,12 @@ class ChecksViewModel(
             } else {
                 addr.address
             }
+            // Ищем результат: точное совпадение target, или IP содержится в URL target
+            // (для DNS IP target = "sni://1.2.3.4:443", addr.address = "1.2.3.4")
             val result = matchingResults.find { r ->
-                r.target == targetAddr || r.target == addr.address
+                r.target == targetAddr || r.target == addr.address ||
+                extractHostFromTarget(r.target) == addr.address ||
+                (targetAddr != null && extractHostFromTarget(r.target) == targetAddr)
             }
             if (result != null) {
                 addr.copy(
@@ -1618,7 +1633,7 @@ class ChecksViewModel(
                 } else {
                     // Для DNS IP ищем fallback результат (target содержит IP)
                     endpointResultList.firstOrNull { !it.isMainAddress && it.target == addr.address }
-                        ?: endpointResultList.firstOrNull { !it.isMainAddress && it.target.contains(addr.address) }
+                        ?: endpointResultList.firstOrNull { !it.isMainAddress && extractHostFromTarget(it.target) == addr.address }
                 }
 
                 if (result != null) {

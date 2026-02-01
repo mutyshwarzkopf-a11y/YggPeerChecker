@@ -38,11 +38,11 @@ class SessionManager(private val context: Context) {
                 try {
                     val json = JSONObject(file.readText())
                     SavedSession(
-                        name = json.getString("name"),
+                        name = json.optString("name", file.nameWithoutExtension),
                         fileName = file.name,
-                        savedAt = json.getLong("savedAt"),
-                        peersCount = json.getInt("peersCount"),
-                        availableCount = json.getInt("availableCount")
+                        savedAt = json.optLong("savedAt", file.lastModified()),
+                        peersCount = json.optInt("peersCount", 0),
+                        availableCount = json.optInt("availableCount", 0)
                     )
                 } catch (e: Exception) {
                     null
@@ -117,7 +117,7 @@ class SessionManager(private val context: Context) {
                 val json = JSONObject(file.readText())
 
                 // Загружаем peers (поддерживаем полный и legacy формат)
-                val peersArray = json.getJSONArray("peers")
+                val peersArray = json.optJSONArray("peers") ?: JSONArray()
                 val peers = mutableListOf<DiscoveredPeer>()
                 for (i in 0 until peersArray.length()) {
                     try {
@@ -128,17 +128,17 @@ class SessionManager(private val context: Context) {
                     }
                 }
 
-                // Загружаем hostResults
-                val resultsObj = json.getJSONObject("hostResults")
+                // Загружаем hostResults (lenient — старые сессии могут не иметь этого поля)
+                val resultsObj = json.optJSONObject("hostResults")
                 val hostResults = mutableMapOf<String, List<HostCheckResult>>()
-                resultsObj.keys().forEach { address ->
-                    val resultsArray = resultsObj.getJSONArray(address)
+                resultsObj?.keys()?.forEach { address ->
+                    val resultsArray = resultsObj?.optJSONArray(address) ?: return@forEach
                     val results = mutableListOf<HostCheckResult>()
                     for (i in 0 until resultsArray.length()) {
                         val resultJson = resultsArray.getJSONObject(i)
                         results.add(HostCheckResult(
-                            target = resultJson.getString("target"),
-                            isMainAddress = resultJson.getBoolean("isMainAddress"),
+                            target = resultJson.optString("target", ""),
+                            isMainAddress = resultJson.optBoolean("isMainAddress", true),
                             pingTime = resultJson.optLong("pingTime", -1),
                             yggRtt = resultJson.optLong("yggRtt", -1),
                             portDefault = resultJson.optLong("portDefault", -1),

@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
@@ -159,8 +160,26 @@ fun ChecksScreen(
     }
 
     // Применяем фильтры и сортировки к списку результатов
-    val filteredPeers = remember(uiState.peers, uiState.typeFilter, uiState.sourceFilter, uiState.sortType, uiState.filterMs) {
+    val filteredPeers = remember(uiState.peers, uiState.typeFilter, uiState.sourceFilter, uiState.sortType, uiState.filterMs, uiState.searchQuery) {
         var result = uiState.peers
+
+        // Быстрый текстовый фильтр
+        if (uiState.searchQuery.isNotBlank()) {
+            val q = uiState.searchQuery.lowercase()
+            result = result.filter { peer ->
+                peer.address.lowercase().contains(q) ||
+                peer.protocol.lowercase().contains(q) ||
+                peer.sourceShort.lowercase().contains(q) ||
+                peer.source.lowercase().contains(q) ||
+                peer.region.lowercase().contains(q) ||
+                peer.geoIp.lowercase().contains(q) ||
+                // Поиск среди fallback IP
+                (uiState.hostResults[peer.address]?.any { r ->
+                    r.target.lowercase().contains(q) ||
+                    (r.resolvedIp?.lowercase()?.contains(q) == true)
+                } == true)
+            }
+        }
 
         // Фильтр по типу (для отображения)
         result = when (uiState.typeFilter) {
@@ -221,8 +240,26 @@ fun ChecksScreen(
     }
 
     // Фильтрованный список групп для grouped view
-    val filteredGroupedHosts = remember(uiState.groupedHosts, uiState.typeFilter, uiState.sourceFilter, uiState.sortType, uiState.filterMs) {
+    val filteredGroupedHosts = remember(uiState.groupedHosts, uiState.typeFilter, uiState.sourceFilter, uiState.sortType, uiState.filterMs, uiState.searchQuery) {
         var result = uiState.groupedHosts
+
+        // Быстрый текстовый фильтр — фильтрует карточку целиком
+        if (uiState.searchQuery.isNotBlank()) {
+            val q = uiState.searchQuery.lowercase()
+            result = result.filter { group ->
+                group.displayName.lowercase().contains(q) ||
+                group.groupKey.lowercase().contains(q) ||
+                group.source.lowercase().contains(q) ||
+                group.shortSource().lowercase().contains(q) ||
+                (group.geoIp?.lowercase()?.contains(q) == true) ||
+                (group.region?.lowercase()?.contains(q) == true) ||
+                group.addresses.any { addr -> addr.address.lowercase().contains(q) } ||
+                group.endpoints.any { ep ->
+                    ep.protocol.lowercase().contains(q) ||
+                    ep.originalUrl.lowercase().contains(q)
+                }
+            }
+        }
 
         // Фильтр по источнику
         if (uiState.sourceFilter != "All") {
@@ -272,42 +309,7 @@ fun ChecksScreen(
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // Информация о БД - кликабельные фильтры
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                StatChip(
-                    label = "All",
-                    count = uiState.dbHostsCount,
-                    isSelected = uiState.typeFilter == "All",
-                    onClick = { viewModel.setTypeFilter("All") }
-                )
-                StatChip(
-                    label = "Ygg",
-                    count = uiState.dbYggCount,
-                    isSelected = uiState.typeFilter == "Ygg",
-                    onClick = { viewModel.setTypeFilter("Ygg") }
-                )
-                StatChip(
-                    label = "SNI",
-                    count = uiState.dbSniCount,
-                    isSelected = uiState.typeFilter == "SNI",
-                    onClick = { viewModel.setTypeFilter("SNI") }
-                )
-                StatChip(
-                    label = "Vless",
-                    count = uiState.dbVlessCount,
-                    isSelected = uiState.typeFilter == "Vless",
-                    onClick = { viewModel.setTypeFilter("Vless") }
-                )
-            }
-        }
-
-        // Динамический фильтр по источникам (из БД)
+        // Фильтр по источникам (из БД)
         if (uiState.availableSources.isNotEmpty()) {
             LazyRow(
                 modifier = Modifier.fillMaxWidth(),
@@ -401,6 +403,35 @@ fun ChecksScreen(
             }
         }
 
+        // Быстрый поиск/фильтр результатов
+        OutlinedTextField(
+            value = uiState.searchQuery,
+            onValueChange = { viewModel.setSearchQuery(it) },
+            placeholder = { Text("Filter: host, IP, protocol, source...", fontSize = 12.sp) },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(44.dp),
+            textStyle = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
+            leadingIcon = {
+                Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp))
+            },
+            trailingIcon = {
+                if (uiState.searchQuery.isNotEmpty()) {
+                    IconButton(
+                        onClick = { viewModel.setSearchQuery("") },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Clear",
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+        )
+
         // Краткая информация о настройках
         Text(
             text = "Checks: ${uiState.enabledCheckTypes.joinToString { it.displayName }}${if (uiState.fastMode) " [Quick]" else ""}",
@@ -426,10 +457,7 @@ fun ChecksScreen(
                             ) {
                                 // PING всегда активен - отображаем с пометкой
                                 Text(
-                                    text = if (checkType == CheckType.PING)
-                                        "${checkType.displayName} (always)"
-                                    else
-                                        checkType.displayName,
+                                    text = checkType.displayName,
                                     color = if (checkType == CheckType.PING)
                                         MaterialTheme.colorScheme.primary
                                     else
@@ -438,7 +466,7 @@ fun ChecksScreen(
                                 Checkbox(
                                     checked = uiState.enabledCheckTypes.contains(checkType),
                                     onCheckedChange = { viewModel.toggleCheckType(checkType) },
-                                    enabled = checkType != CheckType.PING  // PING нельзя отключить
+                                    enabled = true
                                 )
                             }
                         }

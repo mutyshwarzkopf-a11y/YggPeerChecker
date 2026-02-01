@@ -8,7 +8,9 @@ enum class AddressType(val displayName: String) {
     IP0("ip0"),   // Текущий резолвленный IP (при проверке, если отличается от кэшированных)
     IP1("ip1"),   // Первый DNS IP (кэшированный)
     IP2("ip2"),   // Второй DNS IP (кэшированный)
-    IP3("ip3")    // Третий DNS IP (кэшированный)
+    IP3("ip3"),   // Третий DNS IP (кэшированный)
+    IP4("ip4"),   // Четвёртый DNS IP
+    IP5("ip5")    // Пятый DNS IP
 }
 
 /**
@@ -16,7 +18,8 @@ enum class AddressType(val displayName: String) {
  */
 data class HostAddress(
     val address: String,             // "myws.org" или "1.1.1.1"
-    val type: AddressType,           // HST, IP1, IP2, IP3
+    val type: AddressType,           // HST, IP0, IP1, IP2, IP3, IP4, IP5
+    val dnsSource: String? = null,   // DNS сервер, с которого получен IP ("yandex", "cloudflare", "google", "system", или custom IP)
     val pingResult: Long = -1,       // -1 = off, -2 = X, >=0 = ms
     val port80Result: Long = -1,
     val port443Result: Long = -1

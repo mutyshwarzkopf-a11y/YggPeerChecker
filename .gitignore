@@ -14,7 +14,7 @@ local.properties
 # Personal/Internal docs (не для публикации)
 mike.md
 schema.md
-plan.md
+plan*.md
 yggpeers_complete*.md
 qwen*
 CLAU*

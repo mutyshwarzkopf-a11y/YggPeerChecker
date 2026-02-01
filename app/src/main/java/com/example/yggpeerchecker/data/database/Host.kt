@@ -20,6 +20,13 @@ data class Host(
     val dnsIp1: String? = null,              // закэшированный первый IP из DNS
     val dnsIp2: String? = null,              // второй IP из DNS результата
     val dnsIp3: String? = null,              // третий IP из DNS результата
+    val dnsIp4: String? = null,              // четвёртый DNS IP
+    val dnsIp5: String? = null,              // пятый DNS IP
+    val dnsSource1: String? = null,          // DNS сервер для ip1 ("yandex", "cloudflare", "google", "system", custom IP)
+    val dnsSource2: String? = null,          // DNS сервер для ip2
+    val dnsSource3: String? = null,          // DNS сервер для ip3
+    val dnsSource4: String? = null,          // DNS сервер для ip4
+    val dnsSource5: String? = null,          // DNS сервер для ip5
     val dnsTimestamp: Long? = null,          // когда был выполнен DNS резолв
     val geoIp: String? = null                // GeoIP info: "CC:City" (например "US:Washington")
 ) {

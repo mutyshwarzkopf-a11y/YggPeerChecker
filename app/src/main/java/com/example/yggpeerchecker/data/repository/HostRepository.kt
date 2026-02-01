@@ -368,6 +368,235 @@ class HostRepository(private val context: Context, private val logger: Persisten
         return Pair(result.ips, result.isSpoofed)
     }
 
+    /**
+     * DNS — заполнение ip1-ip5 с выбранного DNS сервера.
+     * Заполняет только пустые слоты уникальными IP.
+     * Localhost: пишем только если НИ один ip ещё не заполнен;
+     * при дозаполнении — заменяем localhost нормальными адресами.
+     */
+    suspend fun fillDnsFromServer(
+        serverIp: String,
+        serverName: String,
+        onProgress: (Int, Int) -> Unit
+    ): Result<Pair<Int, Int>> = withContext(Dispatchers.IO) {
+        try {
+            val localhostAddresses = setOf("127.0.0.1", "0.0.0.0", "::1", "localhost", "127.0.0.0", "0:0:0:0:0:0:0:1")
+            val hosts = hostDao.getAllHostsList()
+            // Только хосты с hostname (не чистые IP) с хотя бы одним пустым или localhost слотом
+            val hostsToFill = hosts.filter { host ->
+                !isIpAddress(host.address) && hasEmptyOrLocalhostSlot(host, localhostAddresses)
+            }
+            val total = hostsToFill.size
+            var totalFilled = 0
+            val now = System.currentTimeMillis()
+            val concurrentStreams = getConcurrentStreams()
+            val semaphore = kotlinx.coroutines.sync.Semaphore(concurrentStreams)
+            val progressCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+            logger.appendLogSync("INFO", "DNS fill from $serverName ($serverIp) for $total hosts, $concurrentStreams streams")
+
+            coroutineScope {
+                hostsToFill.map { host ->
+                    async {
+                        semaphore.withPermit {
+                            try {
+                                val freshHost = hostDao.getHostById(host.id) ?: return@withPermit
+                                if (!hasEmptyOrLocalhostSlot(freshHost, localhostAddresses)) return@withPermit
+
+                                val result = DnsResolver.resolve(freshHost.address, serverIp, 5000)
+                                if (result.ips.isEmpty()) return@withPermit
+
+                                val currentIps = mutableListOf(
+                                    freshHost.dnsIp1, freshHost.dnsIp2, freshHost.dnsIp3,
+                                    freshHost.dnsIp4, freshHost.dnsIp5
+                                )
+                                val currentSrcs = mutableListOf(
+                                    freshHost.dnsSource1, freshHost.dnsSource2, freshHost.dnsSource3,
+                                    freshHost.dnsSource4, freshHost.dnsSource5
+                                )
+                                var changed = false
+
+                                // Проверяем: есть ли хоть один нормальный (не-localhost) IP уже заполнен
+                                val hasNonLocalhostIp = currentIps.any { ip ->
+                                    ip != null && ip.lowercase().trim() !in localhostAddresses
+                                }
+
+                                for (newIp in result.ips) {
+                                    val isNewIpLocalhost = newIp.lowercase().trim() in localhostAddresses
+
+                                    // Localhost: пишем ТОЛЬКО если ни один IP не заполнен (первый проход)
+                                    if (isNewIpLocalhost && hasNonLocalhostIp) continue
+                                    if (isNewIpLocalhost && currentIps.any { it != null }) continue
+
+                                    // Не дублировать уже имеющиеся нормальные IP
+                                    val existingNonLocalhost = currentIps.filterNotNull()
+                                        .filter { it.lowercase().trim() !in localhostAddresses }
+                                    if (!isNewIpLocalhost && newIp in existingNonLocalhost) continue
+
+                                    // Ищем пустой слот или слот с localhost (для замены)
+                                    val slotIdx = currentIps.indexOfFirst { ip ->
+                                        ip == null || (!isNewIpLocalhost && ip.lowercase().trim() in localhostAddresses)
+                                    }
+                                    if (slotIdx >= 0) {
+                                        currentIps[slotIdx] = newIp
+                                        currentSrcs[slotIdx] = serverName
+                                        changed = true
+                                        totalFilled++
+                                    }
+                                }
+
+                                if (changed) {
+                                    hostDao.updateDnsIpsFull(
+                                        hostId = freshHost.id,
+                                        ip1 = currentIps[0], ip2 = currentIps[1], ip3 = currentIps[2],
+                                        ip4 = currentIps[3], ip5 = currentIps[4],
+                                        src1 = currentSrcs[0], src2 = currentSrcs[1], src3 = currentSrcs[2],
+                                        src4 = currentSrcs[3], src5 = currentSrcs[4],
+                                        timestamp = now
+                                    )
+                                    dnsCacheDao.insert(DnsCache(
+                                        hostname = freshHost.address,
+                                        ip1 = currentIps[0], ip2 = currentIps[1], ip3 = currentIps[2],
+                                        ip4 = currentIps[3], ip5 = currentIps[4],
+                                        dnsSource1 = currentSrcs[0], dnsSource2 = currentSrcs[1], dnsSource3 = currentSrcs[2],
+                                        dnsSource4 = currentSrcs[3], dnsSource5 = currentSrcs[4],
+                                        cachedAt = now
+                                    ))
+                                }
+                            } catch (e: Exception) {
+                                logger.appendLogSync("WARN", "DNS fill error for ${host.address} from $serverName: ${e.message}")
+                            }
+                            onProgress(progressCount.incrementAndGet(), total)
+                        }
+                    }
+                }.awaitAll()
+            }
+
+            val skipped = hosts.size - total
+            logger.appendLogSync("INFO", "DNS fill from $serverName completed: $totalFilled IPs for $total hosts (skipped $skipped)")
+            Result.success(Pair(totalFilled, skipped))
+        } catch (e: Exception) {
+            logger.appendLogSync("ERROR", "DNS fill from $serverName failed: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * DNS++ — дозаполнение ip1-ip5 со всех DNS серверов последовательно.
+     * Порядок: Yandex → Cloudflare → Google → System.
+     * Заполняет только пустые слоты уникальными IP.
+     * Localhost IP заполняются (для отображения), но при повторном проходе перезаписываются.
+     */
+    suspend fun fillDnsFromAllServers(onProgress: (String, Int, Int) -> Unit): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            val localhostAddresses = setOf("127.0.0.1", "0.0.0.0", "::1", "localhost", "127.0.0.0", "0:0:0:0:0:0:0:1")
+            val dnsServers = listOf(
+                "77.88.8.8" to "yandex",
+                "1.1.1.1" to "cloudflare",
+                "8.8.8.8" to "google",
+                "system" to "system"
+            )
+            val hosts = hostDao.getAllHostsList()
+            // Только хосты с hostname (не чистые IP) с хотя бы одним пустым слотом
+            val hostsToFill = hosts.filter { host ->
+                !isIpAddress(host.address) && hasEmptyOrLocalhostSlot(host, localhostAddresses)
+            }
+            val total = hostsToFill.size
+            var totalFilled = 0
+            val now = System.currentTimeMillis()
+
+            logger.appendLogSync("INFO", "DNS++ starting for $total hosts from ${dnsServers.size} servers")
+
+            for ((serverIp, serverName) in dnsServers) {
+                onProgress("Resolving from $serverName...", totalFilled, total)
+                logger.appendLogSync("INFO", "DNS++ pass: $serverName ($serverIp)")
+
+                val concurrentStreams = getConcurrentStreams()
+                val semaphore = kotlinx.coroutines.sync.Semaphore(concurrentStreams)
+
+                coroutineScope {
+                    hostsToFill.map { host ->
+                        async {
+                            semaphore.withPermit {
+                                try {
+                                    // Перечитываем хост из БД чтобы видеть результаты предыдущих серверов
+                                    val freshHost = hostDao.getHostById(host.id) ?: return@withPermit
+                                    if (!hasEmptyOrLocalhostSlot(freshHost, localhostAddresses)) return@withPermit
+
+                                    val result = DnsResolver.resolve(freshHost.address, serverIp, 5000)
+                                    if (result.ips.isEmpty()) return@withPermit
+
+                                    // Текущие IP и источники
+                                    val currentIps = mutableListOf(
+                                        freshHost.dnsIp1, freshHost.dnsIp2, freshHost.dnsIp3,
+                                        freshHost.dnsIp4, freshHost.dnsIp5
+                                    )
+                                    val currentSrcs = mutableListOf(
+                                        freshHost.dnsSource1, freshHost.dnsSource2, freshHost.dnsSource3,
+                                        freshHost.dnsSource4, freshHost.dnsSource5
+                                    )
+                                    var changed = false
+
+                                    for (newIp in result.ips) {
+                                        // Не дублировать уже имеющиеся IP (кроме localhost — их перезаписываем)
+                                        val existingNonLocalhost = currentIps.filterNotNull()
+                                            .filter { it.lowercase() !in localhostAddresses }
+                                        if (newIp in existingNonLocalhost) continue
+
+                                        // Ищем пустой слот или слот с localhost
+                                        val slotIdx = currentIps.indexOfFirst { ip ->
+                                            ip == null || ip.lowercase().trim() in localhostAddresses
+                                        }
+                                        if (slotIdx >= 0) {
+                                            currentIps[slotIdx] = newIp
+                                            currentSrcs[slotIdx] = serverName
+                                            changed = true
+                                            totalFilled++
+                                        }
+                                    }
+
+                                    if (changed) {
+                                        hostDao.updateDnsIpsFull(
+                                            hostId = freshHost.id,
+                                            ip1 = currentIps[0], ip2 = currentIps[1], ip3 = currentIps[2],
+                                            ip4 = currentIps[3], ip5 = currentIps[4],
+                                            src1 = currentSrcs[0], src2 = currentSrcs[1], src3 = currentSrcs[2],
+                                            src4 = currentSrcs[3], src5 = currentSrcs[4],
+                                            timestamp = now
+                                        )
+                                        // Обновляем DNS кэш
+                                        dnsCacheDao.insert(DnsCache(
+                                            hostname = freshHost.address,
+                                            ip1 = currentIps[0], ip2 = currentIps[1], ip3 = currentIps[2],
+                                            ip4 = currentIps[3], ip5 = currentIps[4],
+                                            dnsSource1 = currentSrcs[0], dnsSource2 = currentSrcs[1], dnsSource3 = currentSrcs[2],
+                                            dnsSource4 = currentSrcs[3], dnsSource5 = currentSrcs[4],
+                                            cachedAt = now
+                                        ))
+                                    }
+                                } catch (e: Exception) {
+                                    logger.appendLogSync("WARN", "DNS++ error for ${host.address} from $serverName: ${e.message}")
+                                }
+                            }
+                        }
+                    }.awaitAll()
+                }
+            }
+
+            logger.appendLogSync("INFO", "DNS++ completed: $totalFilled new IPs filled for $total hosts")
+            Result.success(totalFilled)
+        } catch (e: Exception) {
+            logger.appendLogSync("ERROR", "DNS++ failed: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    // Проверка: есть ли пустой или localhost слот в ip1-ip5
+    private fun hasEmptyOrLocalhostSlot(host: Host, localhostAddresses: Set<String>): Boolean {
+        val ips = listOf(host.dnsIp1, host.dnsIp2, host.dnsIp3, host.dnsIp4, host.dnsIp5)
+        return ips.any { it == null || it.lowercase().trim() in localhostAddresses }
+    }
+
     // Сохранение результата проверки
     suspend fun saveCheckResult(result: CheckResult) {
         checkResultDao.insert(result)

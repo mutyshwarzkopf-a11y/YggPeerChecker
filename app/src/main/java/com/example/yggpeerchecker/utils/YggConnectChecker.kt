@@ -27,6 +27,7 @@ object YggConnectChecker {
 
     private const val CONNECT_TIMEOUT_MS = 5000
     private const val QUIC_TIMEOUT_MS = 6000L
+    private const val TLS_TIMEOUT_MS = 6000L
 
     // Manager из yggpeers.aar — устанавливается из ChecksViewModel
     var manager: Manager? = null
@@ -43,7 +44,7 @@ object YggConnectChecker {
 
             when (protocol) {
                 "tcp", "ws" -> checkTcp(host, port)
-                "tls", "wss" -> checkTls(host, port)
+                "tls", "wss" -> checkTls(host, port, hostString)
                 "quic" -> checkQuic(host, port, hostString)
                 else -> -1L
             }
@@ -75,42 +76,75 @@ object YggConnectChecker {
     }
 
     /**
-     * Проверка через TLS handshake
+     * Проверка через TLS handshake используя yggpeers.aar Manager.
+     * Go сторона использует tls.DialWithDialer с InsecureSkipVerify: true
+     * и NextProtos: ["yggdrasil"], что позволяет проверять Ygg пиры
+     * с самоподписанными сертификатами.
      */
-    private fun checkTls(host: String, port: Int): Long {
+    private suspend fun checkTls(host: String, port: Int, hostString: String): Long {
+        val mgr = manager ?: return checkTlsFallback(host, port)  // Fallback если нет Manager
+
+        val deferred = CompletableDeferred<Long>()
+
+        // JSON для Go: Address, Protocol, Host, Port (Port — строка в Go)
+        val peerJson = JSONArray().put(
+            JSONObject().apply {
+                put("Address", hostString)
+                put("Protocol", "tls")
+                put("Host", host)
+                put("Port", port.toString())
+            }
+        ).toString()
+
+        mgr.checkPeersAsync(peerJson, object : CheckCallback {
+            override fun onPeerChecked(address: String?, available: Boolean, rtt: Long) {
+                if (available && rtt >= 0) {
+                    deferred.complete(rtt)
+                } else {
+                    deferred.complete(-1L)
+                }
+            }
+
+            override fun onCheckComplete(available: Long, total: Long) {
+                // Страховка: если onPeerChecked не вызван
+                if (!deferred.isCompleted) {
+                    deferred.complete(-1L)
+                }
+            }
+        })
+
+        return try {
+            withTimeout(TLS_TIMEOUT_MS) { deferred.await() }
+        } catch (e: Exception) {
+            -1L
+        }
+    }
+
+    /**
+     * Fallback TLS проверка через стандартный Java SSL (без InsecureSkipVerify).
+     * Используется если Manager недоступен.
+     */
+    private fun checkTlsFallback(host: String, port: Int): Long {
         val startTime = System.currentTimeMillis()
         val socket = Socket()
-        
+
         return try {
-            // Сначала TCP connect
             socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
             socket.soTimeout = CONNECT_TIMEOUT_MS
-            
-            // Затем TLS handshake
+
             val sslSocketFactory = SSLSocketFactory.getDefault() as SSLSocketFactory
             val sslSocket = sslSocketFactory.createSocket(
-                socket,
-                host,
-                port,
-                true // autoClose
+                socket, host, port, true
             ) as javax.net.ssl.SSLSocket
-            
-            // Yggdrasil использует самоподписанные сертификаты
-            // Для проверки доступности достаточно установить соединение
+
             sslSocket.startHandshake()
-            
             val rtt = System.currentTimeMillis() - startTime
-            
             sslSocket.close()
             rtt
         } catch (e: Exception) {
             -1L
         } finally {
-            try {
-                socket.close()
-            } catch (e: Exception) {
-                // Игнорируем ошибки закрытия
-            }
+            try { socket.close() } catch (_: Exception) {}
         }
     }
 
