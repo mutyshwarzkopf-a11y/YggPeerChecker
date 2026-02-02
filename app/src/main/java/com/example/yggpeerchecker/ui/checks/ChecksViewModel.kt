@@ -164,6 +164,8 @@ class ChecksViewModel(
     private val database = AppDatabase.getDatabase(context)
     private val sessionManager = SessionManager(context)
     private val checksPrefs = context.getSharedPreferences("checks_prefs", Context.MODE_PRIVATE)
+    // Кэшированный pingCount — читается один раз при старте проверок
+    @Volatile private var cachedPingCount: Int = 1
 
     private fun getConcurrentStreams(): Int {
         val prefs = context.getSharedPreferences("ygg_prefs", Context.MODE_PRIVATE)
@@ -488,6 +490,10 @@ class ChecksViewModel(
         viewModelScope.launch {
             discoveryJob?.join()
             loadDbStats()
+
+            // Кэшируем pingCount перед началом проверок
+            cachedPingCount = context.getSharedPreferences("ygg_prefs", Context.MODE_PRIVATE)
+                .getInt("ping_count", 1)
 
             val dbHosts = withContext(Dispatchers.IO) {
                 when (_uiState.value.typeFilter) {
@@ -884,9 +890,7 @@ class ChecksViewModel(
             // PING
             if (enabledTypes.contains(CheckType.PING)) {
                 logger.appendLogSync("DEBUG", "Ping check: $target")
-                val pingCount = context.getSharedPreferences("ygg_prefs", Context.MODE_PRIVATE)
-                    .getInt("ping_count", 1)
-                val ping = PingUtil.ping(target, 3000, pingCount)
+                val ping = PingUtil.ping(target, 3000, cachedPingCount)
                 if (ping >= 0) {
                     pingTime = ping.toLong()
                     available = true
@@ -1625,9 +1629,9 @@ class ChecksViewModel(
             // Результаты именно для ЭТОГО endpoint (по его originalUrl)
             val endpointResultList = groupResults[endpoint.originalUrl] ?: emptyList()
 
-            val checkResults = updatedAddresses.mapNotNull { addr ->
+            val checkResults = updatedAddresses.map { addr ->
                 // Для HST/ip0: ищем mainAddress результат
-                // Для IP1/2/3: ищем fallback результат по IP
+                // Для IP1-5: ищем fallback результат по IP
                 val result = if (addr.type == AddressType.HST || addr.type == AddressType.IP0) {
                     endpointResultList.firstOrNull { it.isMainAddress }
                 } else {
@@ -1636,16 +1640,14 @@ class ChecksViewModel(
                         ?: endpointResultList.firstOrNull { !it.isMainAddress && extractHostFromTarget(it.target) == addr.address }
                 }
 
-                if (result != null) {
-                    val fullUrl = UrlParser.replaceHost(endpoint.originalUrl, addr.address)
-                    EndpointCheckResult(
-                        addressType = addr.type,
-                        address = addr.address,
-                        yggRttMs = result.yggRtt,
-                        portDefaultMs = result.portDefault,
-                        fullUrl = fullUrl
-                    )
-                } else null
+                val fullUrl = UrlParser.replaceHost(endpoint.originalUrl, addr.address)
+                EndpointCheckResult(
+                    addressType = addr.type,
+                    address = addr.address,
+                    yggRttMs = result?.yggRtt ?: -1,
+                    portDefaultMs = result?.portDefault ?: -1,
+                    fullUrl = fullUrl
+                )
             }
             endpoint.copy(checkResults = checkResults)
         }

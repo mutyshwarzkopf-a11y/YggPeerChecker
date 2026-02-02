@@ -409,23 +409,18 @@ fun ChecksScreen(
             onValueChange = { viewModel.setSearchQuery(it) },
             placeholder = { Text("Filter: host, IP, protocol, source...", fontSize = 12.sp) },
             singleLine = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(44.dp),
-            textStyle = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
-            leadingIcon = {
-                Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp))
-            },
+            modifier = Modifier.fillMaxWidth(),
+            textStyle = MaterialTheme.typography.bodyMedium,
             trailingIcon = {
                 if (uiState.searchQuery.isNotEmpty()) {
                     IconButton(
                         onClick = { viewModel.setSearchQuery("") },
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier.size(32.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Clear",
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
@@ -1003,32 +998,39 @@ private fun SourceFilterChip(
     onClick: () -> Unit
 ) {
     val backgroundColor = if (isSelected)
-        MaterialTheme.colorScheme.secondaryContainer
+        MaterialTheme.colorScheme.primary
     else
         MaterialTheme.colorScheme.surfaceVariant
     val textColor = if (isSelected)
-        MaterialTheme.colorScheme.onSecondaryContainer
+        MaterialTheme.colorScheme.onPrimary
     else
         MaterialTheme.colorScheme.onSurfaceVariant
 
     Card(
         modifier = Modifier.clickable { onClick() },
-        colors = CardDefaults.cardColors(containerColor = backgroundColor)
+        colors = CardDefaults.cardColors(containerColor = backgroundColor),
+        border = if (isSelected) {
+            androidx.compose.foundation.BorderStroke(
+                1.5.dp,
+                MaterialTheme.colorScheme.primary
+            )
+        } else null
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelSmall,
-                color = textColor
+                color = textColor,
+                fontWeight = if (isSelected) androidx.compose.ui.text.font.FontWeight.Bold else null
             )
             Spacer(modifier = Modifier.width(4.dp))
             Text(
                 text = "($count)",
                 style = MaterialTheme.typography.labelSmall,
-                color = textColor.copy(alpha = 0.6f),
+                color = textColor.copy(alpha = if (isSelected) 0.85f else 0.6f),
                 fontSize = 10.sp
             )
         }
