@@ -14,6 +14,7 @@ import com.example.yggpeerchecker.data.HostEndpoint
 import com.example.yggpeerchecker.data.SessionManager
 import com.example.yggpeerchecker.data.database.AppDatabase
 import com.example.yggpeerchecker.data.database.Host
+import com.example.yggpeerchecker.utils.ActiveProber
 import com.example.yggpeerchecker.utils.DnsResolver
 import com.example.yggpeerchecker.utils.NetworkUtil
 import com.example.yggpeerchecker.utils.PersistentLogger
@@ -55,13 +56,15 @@ data class HostCheckResult(
     val target: String,
     val isMainAddress: Boolean,
     val pingTime: Long = -1,
+    val pingTtl: Int = -1,
     val yggRtt: Long = -1,
     val portDefault: Long = -1,
     val port80: Long = -1,
     val port443: Long = -1,
     val available: Boolean = false,
     val error: String = "",
-    val resolvedIp: String? = null  // Текущий резолвленный IP (для ip0)
+    val resolvedIp: String? = null,  // Текущий резолвленный IP (для ip0)
+    val dnsSource: String? = null    // DNS сервер-источник (yandex, cloudflare, google, system)
 ) {
     // Проверка нужна ли перепроверка по конкретному типу
     fun needsCheck(type: CheckType): Boolean = when (type) {
@@ -91,13 +94,15 @@ data class HostCheckResult(
             target = target,
             isMainAddress = isMainAddress,
             pingTime = if (pingTime >= 0) pingTime else other.pingTime,
+            pingTtl = if (pingTtl >= 0) pingTtl else other.pingTtl,
             yggRtt = if (yggRtt >= 0) yggRtt else other.yggRtt,
             portDefault = if (portDefault >= 0) portDefault else other.portDefault,
             port80 = if (port80 >= 0) port80 else other.port80,
             port443 = if (port443 >= 0) port443 else other.port443,
             available = available || other.available,
             error = if (available || other.available) "" else error,
-            resolvedIp = resolvedIp ?: other.resolvedIp
+            resolvedIp = resolvedIp ?: other.resolvedIp,
+            dnsSource = dnsSource ?: other.dnsSource
         )
     }
 }
@@ -143,6 +148,11 @@ data class ChecksUiState(
     // Tracert
     val isTracertRunning: Boolean = false,
     val tracertProgress: Int = 0,
+    // Active probing
+    val isActiveProbing: Boolean = false,
+    val activeProbingType: String = "",
+    val activeProbingProgress: Int = 0,
+    val activeProbingTotal: Int = 0,
     // Группировка
     val groupedHosts: List<GroupedHost> = emptyList(),
     val selectedEndpoints: Set<String> = emptySet(),  // Выбранные endpoint URLs для копирования
@@ -238,6 +248,7 @@ class ChecksViewModel(
                             put("target", result.target)
                             put("isMainAddress", result.isMainAddress)
                             put("pingTime", result.pingTime)
+                            put("pingTtl", result.pingTtl)
                             put("yggRtt", result.yggRtt)
                             put("portDefault", result.portDefault)
                             put("port80", result.port80)
@@ -245,6 +256,7 @@ class ChecksViewModel(
                             put("available", result.available)
                             put("error", result.error)
                             put("resolvedIp", result.resolvedIp ?: "")
+                            put("dnsSource", result.dnsSource ?: "")
                         })
                     }
                     resultsObj.put(key, arr)
@@ -291,13 +303,15 @@ class ChecksViewModel(
                                 target = r.optString("target"),
                                 isMainAddress = r.optBoolean("isMainAddress"),
                                 pingTime = r.optLong("pingTime", -1),
+                                pingTtl = r.optInt("pingTtl", -1),
                                 yggRtt = r.optLong("yggRtt", -1),
                                 portDefault = r.optLong("portDefault", -1),
                                 port80 = r.optLong("port80", -1),
                                 port443 = r.optLong("port443", -1),
                                 available = r.optBoolean("available"),
                                 error = r.optString("error", ""),
-                                resolvedIp = r.optString("resolvedIp", "").ifEmpty { null }
+                                resolvedIp = r.optString("resolvedIp", "").ifEmpty { null },
+                                dnsSource = r.optString("dnsSource", "").ifEmpty { null }
                             ))
                         }
                         hostResults[key] = results
@@ -847,6 +861,7 @@ class ChecksViewModel(
     ): HostCheckResult {
         val resultTarget = displayAddress ?: target  // Что показывать в UI
         var pingTime: Long = -1
+        var pingTtl: Int = -1
         var yggRtt: Long = -1
         var portDefault: Long = -1
         var port80: Long = -1
@@ -877,6 +892,7 @@ class ChecksViewModel(
                 target = resultTarget,
                 isMainAddress = isMainAddress,
                 pingTime = if (enabledTypes.contains(CheckType.PING)) -2 else -1,
+                pingTtl = -1,
                 yggRtt = if (enabledTypes.contains(CheckType.YGG_RTT) && Host.isYggType(hostType)) -2 else -1,
                 portDefault = if (enabledTypes.contains(CheckType.PORT_DEFAULT)) -2 else -1,
                 port80 = if (enabledTypes.contains(CheckType.PORT_80)) -2 else -1,
@@ -886,16 +902,18 @@ class ChecksViewModel(
             )
         }
 
+        val timeoutMs = getNetworkTimeout()
         try {
             // PING
             if (enabledTypes.contains(CheckType.PING)) {
                 logger.appendLogSync("DEBUG", "Ping check: $target")
-                val ping = PingUtil.ping(target, 3000, cachedPingCount)
-                if (ping >= 0) {
-                    pingTime = ping.toLong()
+                val pingResult = PingUtil.ping(target, timeoutMs, cachedPingCount)
+                if (pingResult.rttMs >= 0) {
+                    pingTime = pingResult.rttMs
+                    pingTtl = pingResult.ttl
                     available = true
-                    logger.appendLogSync("DEBUG", "Ping OK: $target = ${pingTime}ms")
-                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                    logger.appendLogSync("DEBUG", "Ping OK: $target = ${pingTime}ms ttl=${pingTtl}")
+                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, pingTtl, yggRtt, portDefault, port80, port443, true)
                 } else {
                     pingTime = -2  // Failed
                     logger.appendLogSync("DEBUG", "Ping FAILED: $target")
@@ -910,7 +928,7 @@ class ChecksViewModel(
                     yggRtt = rtt
                     available = true
                     logger.appendLogSync("DEBUG", "Ygg RTT OK: $hostString = ${yggRtt}ms")
-                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, pingTtl, yggRtt, portDefault, port80, port443, true)
                 } else {
                     yggRtt = -2  // Failed
                     logger.appendLogSync("DEBUG", "Ygg RTT FAILED: $hostString")
@@ -923,12 +941,12 @@ class ChecksViewModel(
             // Port default
             if (enabledTypes.contains(CheckType.PORT_DEFAULT) && port != null && port > 0) {
                 logger.appendLogSync("DEBUG", "Port $port check: $target")
-                val result = SniChecker.checkPort(target, port, 3000)
+                val result = SniChecker.checkPort(target, port, timeoutMs)
                 if (result.available) {
                     portDefault = result.responseTime
                     available = true
                     logger.appendLogSync("DEBUG", "Port $port OK: $target = ${portDefault}ms")
-                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, pingTtl, yggRtt, portDefault, port80, port443, true)
                 } else {
                     portDefault = -2  // Failed
                     logger.appendLogSync("DEBUG", "Port $port FAILED: $target")
@@ -938,12 +956,12 @@ class ChecksViewModel(
             // Port 80
             if (enabledTypes.contains(CheckType.PORT_80)) {
                 logger.appendLogSync("DEBUG", "Port 80 check: $target")
-                val result = SniChecker.checkPort(target, 80, 3000)
+                val result = SniChecker.checkPort(target, 80, timeoutMs)
                 if (result.available) {
                     port80 = result.responseTime
                     available = true
                     logger.appendLogSync("DEBUG", "Port 80 OK: $target = ${port80}ms")
-                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, pingTtl, yggRtt, portDefault, port80, port443, true)
                 } else {
                     port80 = -2  // Failed
                     logger.appendLogSync("DEBUG", "Port 80 FAILED: $target")
@@ -958,16 +976,16 @@ class ChecksViewModel(
                 // Для SNI хостов (когда target - IP, а originalHostname - доменное имя)
                 // используем TLS handshake с указанием hostname в SNI
                 val result = if (originalHostname != null && !Host.isYggType(hostType)) {
-                    SniChecker.checkPortWithSni(target, originalHostname, 443, 5000)
+                    SniChecker.checkPortWithSni(target, originalHostname, 443, timeoutMs)
                 } else {
-                    SniChecker.checkPort(target, 443, 3000)
+                    SniChecker.checkPort(target, 443, timeoutMs)
                 }
 
                 if (result.available) {
                     port443 = result.responseTime
                     available = true
                     logger.appendLogSync("DEBUG", "Port 443 OK: $target = ${port443}ms")
-                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, true)
+                    if (fastMode) return HostCheckResult(resultTarget, isMainAddress, pingTime, pingTtl, yggRtt, portDefault, port80, port443, true)
                 } else {
                     port443 = -2  // Failed
                     logger.appendLogSync("DEBUG", "Port 443 FAILED: $target" +
@@ -982,7 +1000,7 @@ class ChecksViewModel(
 
         if (!available) error = "All checks failed"
 
-        return HostCheckResult(resultTarget, isMainAddress, pingTime, yggRtt, portDefault, port80, port443, available, error)
+        return HostCheckResult(resultTarget, isMainAddress, pingTime, pingTtl, yggRtt, portDefault, port80, port443, available, error)
     }
 
     // Ygg RTT через прямой TCP/TLS connect
@@ -1069,10 +1087,24 @@ class ChecksViewModel(
             ping = bestResult.pingTime,
             // Индивидуальные результаты (сохраняем предыдущие если тип не выбран)
             pingMs = checkValue(bestResult.pingTime, CheckType.PING, existingPeer?.pingMs ?: -1),
+            pingTtl = bestResult.pingTtl,
             yggRttMs = yggRttValue,  // Для SNI всегда -1 (off)
             portDefaultMs = checkValue(bestResult.portDefault, CheckType.PORT_DEFAULT, existingPeer?.portDefaultMs ?: -1),
             port80Ms = checkValue(bestResult.port80, CheckType.PORT_80, existingPeer?.port80Ms ?: -1),
             port443Ms = checkValue(bestResult.port443, CheckType.PORT_443, existingPeer?.port443Ms ?: -1),
+            // Сохраняем active probing данные если были
+            hops = existingPeer?.hops ?: 0,
+            httpStatusCode = existingPeer?.httpStatusCode ?: -1,
+            httpsStatusCode = existingPeer?.httpsStatusCode ?: -1,
+            httpFingerprint = existingPeer?.httpFingerprint ?: "",
+            certFingerprint = existingPeer?.certFingerprint ?: "",
+            activeWarning = existingPeer?.activeWarning ?: "",
+            port80Blocked = existingPeer?.port80Blocked ?: false,
+            port443Blocked = existingPeer?.port443Blocked ?: false,
+            redirectUrl = existingPeer?.redirectUrl ?: "",
+            responseSize = existingPeer?.responseSize ?: -1,
+            comparativeTimingRatio = existingPeer?.comparativeTimingRatio ?: -1f,
+            redirectChain = existingPeer?.redirectChain ?: "",
             normalizedKey = normalizedKey
         )
 
@@ -1411,62 +1443,505 @@ class ChecksViewModel(
     private var tracertJob: Job? = null
 
     fun runTracert() {
-        if (_uiState.value.isTracertRunning) {
-            // Отмена текущего Tracert
+        if (_uiState.value.isTracertRunning || _uiState.value.isActiveProbing) {
             tracertJob?.cancel()
             tracertJob = null
-            _uiState.update { it.copy(isTracertRunning = false, statusMessage = "Tracert cancelled") }
+            activeProbingJob?.cancel()
+            activeProbingJob = null
+            _uiState.update { it.copy(
+                isTracertRunning = false,
+                isActiveProbing = false,
+                statusMessage = "Cancelled"
+            )}
             return
         }
 
         tracertJob = viewModelScope.launch {
-            val alivePeers = _uiState.value.peers.filter { it.isAlive() }
+            val alivePeers = getFilteredPeers().filter { it.isAlive() && !hasActiveResult(it, "tracert") }
             if (alivePeers.isEmpty()) {
-                _uiState.update { it.copy(statusMessage = "No alive peers for tracert") }
+                _uiState.update { it.copy(statusMessage = "No alive peers for tracert (check filters)") }
                 return@launch
             }
 
             _uiState.update { it.copy(
                 isTracertRunning = true,
+                isActiveProbing = true,
+                activeProbingType = "tracert",
                 tracertProgress = 0,
+                activeProbingTotal = alivePeers.size,
                 statusMessage = "Tracert: 0/${alivePeers.size}"
             )}
 
             logger.appendLogSync("INFO", "Starting tracert for ${alivePeers.size} alive peers")
 
             val updatedPeers = _uiState.value.peers.toMutableList()
-            var completed = 0
+            val counter = AtomicInteger(0)
+            val semaphore = Semaphore(getConcurrentStreams())
 
             withContext(Dispatchers.IO) {
-                alivePeers.forEachIndexed { index, peer ->
-                    if (!_uiState.value.isTracertRunning) return@forEachIndexed
+                val jobs = alivePeers.map { peer ->
+                    launch {
+                        if (!_uiState.value.isTracertRunning) return@launch
 
-                    // Извлекаем hostname из адреса
-                    val host = extractHostFromAddress(peer.address)
-                    if (host.isNotEmpty()) {
-                        val hops = TracertUtil.getHopsFast(host)
-                        val peerIndex = updatedPeers.indexOfFirst { it.normalizedKey == peer.normalizedKey }
-                        if (peerIndex >= 0 && hops > 0) {
-                            updatedPeers[peerIndex] = updatedPeers[peerIndex].copy(hops = hops)
-                            logger.appendLogSync("DEBUG", "Tracert $host: $hops hops")
+                        semaphore.withPermit {
+                            if (!_uiState.value.isTracertRunning) return@withPermit
+
+                            // Tracert по всем IP (основной + fallback)
+                            val allIps = getAllIpsForPeer(peer)
+                            var minHops = 0
+                            for (ip in allIps) {
+                                if (!_uiState.value.isTracertRunning) break
+                                val hops = TracertUtil.getHopsFast(ip)
+                                if (hops > 0) {
+                                    minHops = if (minHops == 0) hops else minOf(minHops, hops)
+                                    logger.appendLogSync("DEBUG", "Tracert $ip: $hops hops")
+                                }
+                            }
+                            val peerIndex = updatedPeers.indexOfFirst { it.normalizedKey == peer.normalizedKey }
+                            if (peerIndex >= 0 && minHops > 0) {
+                                synchronized(updatedPeers) {
+                                    updatedPeers[peerIndex] = updatedPeers[peerIndex].copy(hops = minHops)
+                                }
+                            }
+
+                            val done = counter.incrementAndGet()
+                            _uiState.update { it.copy(
+                                tracertProgress = done,
+                                activeProbingProgress = done,
+                                statusMessage = "Tracert: $done/${alivePeers.size}",
+                                peers = updatedPeers.toList()
+                            )}
                         }
                     }
-
-                    completed = index + 1
-                    _uiState.update { it.copy(
-                        tracertProgress = completed,
-                        statusMessage = "Tracert: $completed/${alivePeers.size}",
-                        peers = updatedPeers.toList()
-                    )}
                 }
+                jobs.forEach { it.join() }
             }
 
             _uiState.update { it.copy(
                 isTracertRunning = false,
-                statusMessage = "Tracert completed: $completed peers",
+                isActiveProbing = false,
+                statusMessage = "Tracert completed: ${counter.get()} peers",
                 peers = updatedPeers.toList()
             )}
-            logger.appendLogSync("INFO", "Tracert completed for $completed peers")
+            persistCheckResults()
+            logger.appendLogSync("INFO", "Tracert completed for ${counter.get()} peers")
+        }
+    }
+
+    // === Active Probing ===
+    private var activeProbingJob: Job? = null
+
+    /**
+     * Получение пиров с учётом текущих фильтров и сортировки
+     */
+    private fun getFilteredPeers(): List<DiscoveredPeer> {
+        val state = _uiState.value
+        var result = state.peers
+
+        if (state.sourceFilter != "All") {
+            result = result.filter { it.sourceShort == state.sourceFilter }
+        }
+        if (state.searchQuery.isNotBlank()) {
+            val q = state.searchQuery.lowercase()
+            result = result.filter { peer ->
+                peer.address.lowercase().contains(q) ||
+                peer.protocol.lowercase().contains(q) ||
+                peer.sourceShort.lowercase().contains(q) ||
+                peer.source.lowercase().contains(q) ||
+                peer.region.lowercase().contains(q) ||
+                peer.geoIp.lowercase().contains(q)
+            }
+        }
+        result = when (state.typeFilter) {
+            "Ygg" -> result.filter { it.protocol.lowercase() in listOf("tcp", "tls", "quic", "ws", "wss") }
+            "SNI" -> result.filter { it.protocol.lowercase() in listOf("sni", "http", "https", "vless", "vmess") }
+            "Vless" -> result.filter { it.protocol.lowercase() in listOf("vless", "vmess") }
+            else -> result
+        }
+        val sortType = state.sortType
+        result = result.sortedWith(
+            compareByDescending<DiscoveredPeer> { it.isAlive() }
+                .thenBy { peer ->
+                    val v = when (sortType) {
+                        CheckType.PING -> peer.pingMs
+                        CheckType.YGG_RTT -> peer.yggRttMs
+                        CheckType.PORT_DEFAULT -> peer.portDefaultMs
+                        CheckType.PORT_80 -> peer.port80Ms
+                        CheckType.PORT_443 -> peer.port443Ms
+                    }
+                    if (v >= 0) v else Long.MAX_VALUE
+                }
+        )
+        return result
+    }
+
+    /**
+     * Проверяет есть ли уже результат active probing для данного типа
+     */
+    private fun hasActiveResult(peer: DiscoveredPeer, probeType: String): Boolean {
+        return when (probeType) {
+            "http_fingerprint" -> peer.httpFingerprint.isNotEmpty()
+            "cert_check" -> peer.certFingerprint.isNotEmpty()
+            "http_status" -> peer.httpStatusCode > 0 || peer.httpsStatusCode > 0
+            "comparative_timing" -> peer.comparativeTimingRatio >= 0
+            "redirect_chain" -> peer.redirectChain.isNotEmpty()
+            "response_size" -> peer.responseSize >= 0
+            "tracert" -> peer.hops > 0
+            else -> false
+        }
+    }
+
+    /**
+     * Настраиваемый таймаут из SharedPreferences
+     */
+    private fun getNetworkTimeout(): Int {
+        val prefs = context.getSharedPreferences("ygg_prefs", Context.MODE_PRIVATE)
+        return prefs.getInt("network_timeout_ms", 5000)
+    }
+
+    /**
+     * Все IP адреса для пира (основной + fallback из hostResults)
+     */
+    private fun getAllIpsForPeer(peer: DiscoveredPeer): List<String> {
+        val ips = mutableListOf<String>()
+        val mainHost = extractHostFromAddress(peer.address)
+        if (mainHost.isNotEmpty()) ips.add(mainHost)
+        val fallbacks = _uiState.value.hostResults[peer.address] ?: return ips
+        for (fb in fallbacks) {
+            if (!fb.isMainAddress && fb.target.isNotEmpty()) {
+                val fbHost = extractHostFromAddress(fb.target)
+                if (fbHost.isNotEmpty() && fbHost !in ips) {
+                    if (fb.pingTime >= 0 || fb.port80 >= 0 || fb.port443 >= 0 || fb.portDefault >= 0) {
+                        ips.add(fbHost)
+                    }
+                }
+            }
+        }
+        return ips
+    }
+
+    /**
+     * Открытые порты для конкретного IP (fallback или основного)
+     */
+    private fun getOpenPortsForIp(peer: DiscoveredPeer, ip: String): List<Int> {
+        val mainHost = extractHostFromAddress(peer.address)
+        if (ip == mainHost) return getOpenPorts(peer)
+        val fallbacks = _uiState.value.hostResults[peer.address] ?: return emptyList()
+        val fb = fallbacks.firstOrNull { extractHostFromAddress(it.target) == ip } ?: return emptyList()
+        val ports = mutableListOf<Int>()
+        if (fb.port80 >= 0) ports.add(80)
+        if (fb.port443 >= 0) ports.add(443)
+        if (fb.portDefault >= 0) {
+            val parsed = UrlParser.parse(peer.address)
+            val defPort = parsed?.port ?: 0
+            if (defPort > 0 && defPort != 80 && defPort != 443) ports.add(defPort)
+        }
+        return ports
+    }
+
+    /**
+     * Все порты с положительным результатом для пира (основной хост)
+     */
+    private fun getOpenPorts(peer: DiscoveredPeer): List<Int> {
+        val ports = mutableListOf<Int>()
+        if (peer.port80Ms >= 0) ports.add(80)
+        if (peer.port443Ms >= 0) ports.add(443)
+        if (peer.portDefaultMs >= 0) {
+            val parsed = UrlParser.parse(peer.address)
+            val defPort = parsed?.port ?: 0
+            if (defPort > 0 && defPort != 80 && defPort != 443) ports.add(defPort)
+        }
+        return ports
+    }
+
+    fun startActiveProbing(probeType: String) {
+        if (probeType == "tracert") {
+            runTracert()
+            return
+        }
+        if (activeProbingJob?.isActive == true) {
+            stopActiveProbing()
+            return
+        }
+        activeProbingJob = viewModelScope.launch {
+            _uiState.update { it.copy(
+                isActiveProbing = true,
+                activeProbingType = probeType,
+                activeProbingProgress = 0
+            )}
+            logger.appendLogSync("INFO", "Active probing started: $probeType")
+            try {
+                when (probeType) {
+                    "http_fingerprint" -> runActiveProbeHttpFingerprint()
+                    "cert_check" -> runActiveProbeCertCheck()
+                    "http_status" -> runActiveProbeHttpStatus()
+                    "comparative_timing" -> runActiveProbeComparativeTiming()
+                    "redirect_chain" -> runActiveProbeRedirectChain()
+                    "response_size" -> runActiveProbeResponseSize()
+                    "port80" -> runActiveProbeHttpFingerprint()
+                    "port443" -> runActiveProbeCertCheck()
+                }
+            } catch (e: Exception) {
+                logger.appendLogSync("ERROR", "Active probing failed: ${e.message}")
+            } finally {
+                _uiState.update { it.copy(
+                    isActiveProbing = false,
+                    activeProbingType = "",
+                    statusMessage = "Active probing completed"
+                )}
+                persistCheckResults()
+            }
+        }
+    }
+
+    fun stopActiveProbing() {
+        activeProbingJob?.cancel()
+        activeProbingJob = null
+        if (_uiState.value.isTracertRunning) {
+            tracertJob?.cancel()
+            tracertJob = null
+            _uiState.update { it.copy(isTracertRunning = false) }
+        }
+        _uiState.update { it.copy(
+            isActiveProbing = false,
+            activeProbingType = "",
+            statusMessage = "Active probing stopped"
+        )}
+        logger.appendLogSync("INFO", "Active probing stopped by user")
+    }
+
+    fun clearActiveProbingResults() {
+        _uiState.update { state ->
+            val clearedPeers = state.peers.map { peer ->
+                peer.copy(
+                    hops = 0,
+                    httpStatusCode = -1,
+                    httpsStatusCode = -1,
+                    httpFingerprint = "",
+                    certFingerprint = "",
+                    activeWarning = "",
+                    port80Blocked = false,
+                    port443Blocked = false,
+                    redirectUrl = "",
+                    responseSize = -1,
+                    comparativeTimingRatio = -1f,
+                    redirectChain = ""
+                )
+            }
+            state.copy(peers = clearedPeers, statusMessage = "Active probing results cleared")
+        }
+        persistCheckResults()
+        logger.appendLogSync("INFO", "Active probing results cleared")
+    }
+
+    /**
+     * Общий запуск active probe с фильтрами, пропуском существующих, параллельностью
+     */
+    private suspend fun runGenericActiveProbe(
+        probeType: String,
+        portFilter: (DiscoveredPeer) -> Boolean,
+        statusLabel: String,
+        probeAction: suspend (host: String, peer: DiscoveredPeer, peerIndex: Int, updatedPeers: MutableList<DiscoveredPeer>, timeoutMs: Int) -> Unit
+    ) {
+        val filtered = getFilteredPeers()
+        val targetPeers = filtered.filter { portFilter(it) && !hasActiveResult(it, probeType) }
+        if (targetPeers.isEmpty()) {
+            logger.appendLogSync("WARN", "No peers for $probeType")
+            _uiState.update { it.copy(statusMessage = "No peers to probe (existing results skipped)") }
+            return
+        }
+        _uiState.update { it.copy(activeProbingTotal = targetPeers.size) }
+        logger.appendLogSync("INFO", "$statusLabel: ${targetPeers.size} peers (skipped ${filtered.size - targetPeers.size} with results)")
+
+        val semaphore = Semaphore(getConcurrentStreams())
+        val updatedPeers = _uiState.value.peers.toMutableList()
+        val counter = AtomicInteger(0)
+        val timeoutMs = getNetworkTimeout()
+
+        withContext(Dispatchers.IO) {
+            val jobs = targetPeers.map { peer ->
+                launch {
+                    if (!_uiState.value.isActiveProbing) return@launch
+                    semaphore.withPermit {
+                        if (!_uiState.value.isActiveProbing) return@withPermit
+                        val peerIndex = updatedPeers.indexOfFirst { it.normalizedKey == peer.normalizedKey }
+                        if (peerIndex >= 0) {
+                            val host = extractHostFromAddress(peer.address)
+                            if (host.isNotEmpty()) {
+                                probeAction(host, peer, peerIndex, updatedPeers, timeoutMs)
+                            }
+                        }
+                        val done = counter.incrementAndGet()
+                        _uiState.update { it.copy(
+                            activeProbingProgress = done,
+                            statusMessage = "$statusLabel: $done/${targetPeers.size}",
+                            peers = updatedPeers.toList()
+                        )}
+                    }
+                }
+            }
+            jobs.forEach { it.join() }
+        }
+        _uiState.update { it.copy(peers = updatedPeers.toList()) }
+        updateGroupsWithResults()
+    }
+
+    private suspend fun runActiveProbeHttpFingerprint() {
+        runGenericActiveProbe("http_fingerprint", { it.port80Ms >= 0 || it.portDefaultMs >= 0 }, "HTTP fingerprint"
+        ) { host, peer, peerIndex, updatedPeers, timeoutMs ->
+            val allIps = getAllIpsForPeer(peer)
+            for (ip in allIps) {
+                if (!_uiState.value.isActiveProbing) break
+                val ports = getOpenPortsForIp(peer, ip).filter { it != 443 }
+                for (port in ports) {
+                    if (!_uiState.value.isActiveProbing) break
+                    val result = ActiveProber.probeHttpFingerprint(ip, port, timeoutMs)
+                    synchronized(updatedPeers) {
+                        updatedPeers[peerIndex] = updatedPeers[peerIndex].copy(
+                            httpStatusCode = result.statusCode,
+                            httpFingerprint = result.detail,
+                            port80Blocked = result.isBlocking || updatedPeers[peerIndex].port80Blocked,
+                            activeWarning = if (result.isBlocking) result.warning else updatedPeers[peerIndex].activeWarning
+                        )
+                    }
+                    if (result.isBlocking) logger.appendLogSync("WARN", "BLOCKED: $ip:$port — ${result.detail}")
+                }
+            }
+        }
+    }
+
+    private suspend fun runActiveProbeCertCheck() {
+        runGenericActiveProbe("cert_check", { it.port443Ms >= 0 }, "Cert check"
+        ) { host, peer, peerIndex, updatedPeers, timeoutMs ->
+            val originalHostname = if (!UrlParser.isIpAddress(host)) host else null
+            val allIps = getAllIpsForPeer(peer)
+            for (ip in allIps) {
+                if (!_uiState.value.isActiveProbing) break
+                val tlsPorts = mutableListOf<Int>()
+                val ipPorts = getOpenPortsForIp(peer, ip)
+                if (443 in ipPorts) tlsPorts.add(443)
+                val parsed = UrlParser.parse(peer.address)
+                val defPort = parsed?.port ?: 0
+                if (defPort > 0 && defPort != 80 && defPort != 443 && defPort in ipPorts) tlsPorts.add(defPort)
+                for (port in tlsPorts) {
+                    if (!_uiState.value.isActiveProbing) break
+                    val result = ActiveProber.probeCert(ip, port, originalHostname, timeoutMs)
+                    synchronized(updatedPeers) {
+                        updatedPeers[peerIndex] = updatedPeers[peerIndex].copy(
+                            certFingerprint = result.detail,
+                            port443Blocked = result.isBlocking || updatedPeers[peerIndex].port443Blocked,
+                            activeWarning = if (result.isBlocking) result.warning else updatedPeers[peerIndex].activeWarning
+                        )
+                    }
+                    if (result.isBlocking) logger.appendLogSync("WARN", "CERT MISMATCH: $ip:$port — ${result.detail}")
+                }
+            }
+        }
+    }
+
+    private suspend fun runActiveProbeHttpStatus() {
+        runGenericActiveProbe("http_status", { it.port80Ms >= 0 || it.port443Ms >= 0 || it.portDefaultMs >= 0 }, "HTTP status"
+        ) { host, peer, peerIndex, updatedPeers, timeoutMs ->
+            val allIps = getAllIpsForPeer(peer)
+            for (ip in allIps) {
+                if (!_uiState.value.isActiveProbing) break
+                val ports = getOpenPortsForIp(peer, ip)
+                for (port in ports) {
+                    if (!_uiState.value.isActiveProbing) break
+                    val result = ActiveProber.probeHttpStatus(ip, port, timeoutMs)
+                    synchronized(updatedPeers) {
+                        if (port == 443) {
+                            updatedPeers[peerIndex] = updatedPeers[peerIndex].copy(
+                                httpsStatusCode = result.statusCode,
+                                port443Blocked = result.isBlocking || updatedPeers[peerIndex].port443Blocked,
+                                activeWarning = if (result.isBlocking) result.warning else updatedPeers[peerIndex].activeWarning
+                            )
+                        } else {
+                            updatedPeers[peerIndex] = updatedPeers[peerIndex].copy(
+                                httpStatusCode = result.statusCode,
+                                port80Blocked = result.isBlocking || updatedPeers[peerIndex].port80Blocked,
+                                activeWarning = if (result.isBlocking) result.warning else updatedPeers[peerIndex].activeWarning
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun runActiveProbeComparativeTiming() {
+        runGenericActiveProbe("comparative_timing",
+            { it.pingMs > 0 && (it.port80Ms >= 0 || it.port443Ms >= 0 || it.portDefaultMs >= 0) }, "Timing"
+        ) { host, peer, peerIndex, updatedPeers, timeoutMs ->
+            val allIps = getAllIpsForPeer(peer)
+            var worstRatio = -1f
+            var hasAnomaly = false
+            for (ip in allIps) {
+                if (!_uiState.value.isActiveProbing) break
+                val ports = getOpenPortsForIp(peer, ip)
+                val bestPort = ports.firstOrNull() ?: continue
+                val result = ActiveProber.probeComparativeTiming(ip, bestPort, peer.pingMs, timeoutMs)
+                val ratio = result.detail.substringAfter("=").substringBefore("x").toFloatOrNull() ?: -1f
+                if (ratio > worstRatio) worstRatio = ratio
+                if (result.isBlocking) hasAnomaly = true
+            }
+            synchronized(updatedPeers) {
+                updatedPeers[peerIndex] = updatedPeers[peerIndex].copy(
+                    comparativeTimingRatio = worstRatio,
+                    activeWarning = if (hasAnomaly) "anomaly" else updatedPeers[peerIndex].activeWarning
+                )
+            }
+        }
+    }
+
+    private suspend fun runActiveProbeRedirectChain() {
+        runGenericActiveProbe("redirect_chain", { it.port80Ms >= 0 || it.port443Ms >= 0 }, "Redirect chain"
+        ) { host, peer, peerIndex, updatedPeers, timeoutMs ->
+            val allIps = getAllIpsForPeer(peer)
+            val chainParts = mutableListOf<String>()
+            var lastRedirectUrl = ""
+            var isBlocked = false
+            for (ip in allIps) {
+                if (!_uiState.value.isActiveProbing) break
+                val ports = getOpenPortsForIp(peer, ip)
+                val port = if (443 in ports) 443 else if (80 in ports) 80 else continue
+                val result = ActiveProber.probeRedirectChain(ip, port, 5, timeoutMs)
+                if (result.detail.isNotEmpty()) chainParts.add("[$ip] ${result.detail}")
+                if (result.redirectUrl.isNotEmpty()) lastRedirectUrl = result.redirectUrl
+                if (result.isBlocking) isBlocked = true
+            }
+            synchronized(updatedPeers) {
+                updatedPeers[peerIndex] = updatedPeers[peerIndex].copy(
+                    redirectChain = chainParts.joinToString("; "),
+                    redirectUrl = lastRedirectUrl,
+                    activeWarning = if (isBlocked) "blocked" else updatedPeers[peerIndex].activeWarning
+                )
+            }
+        }
+    }
+
+    private suspend fun runActiveProbeResponseSize() {
+        runGenericActiveProbe("response_size", { it.port80Ms >= 0 || it.portDefaultMs >= 0 }, "Response size"
+        ) { host, peer, peerIndex, updatedPeers, timeoutMs ->
+            val allIps = getAllIpsForPeer(peer)
+            var minSize = -1
+            var isBlocked = false
+            for (ip in allIps) {
+                if (!_uiState.value.isActiveProbing) break
+                val ports = getOpenPortsForIp(peer, ip)
+                val port = if (80 in ports) 80 else ports.firstOrNull { it != 443 } ?: continue
+                val result = ActiveProber.probeResponseSize(ip, port, timeoutMs)
+                if (result.responseSize >= 0) {
+                    minSize = if (minSize < 0) result.responseSize else minOf(minSize, result.responseSize)
+                }
+                if (result.isBlocking) isBlocked = true
+            }
+            synchronized(updatedPeers) {
+                updatedPeers[peerIndex] = updatedPeers[peerIndex].copy(
+                    responseSize = minSize,
+                    activeWarning = if (isBlocked) "blocked" else updatedPeers[peerIndex].activeWarning
+                )
+            }
         }
     }
 
@@ -1548,9 +2023,11 @@ class ChecksViewModel(
         val hostResults = _uiState.value.hostResults
         val sortType = _uiState.value.sortType
 
-        // Получаем хосты из БД для группировки
+        // Получаем только проверенные хосты из БД
         viewModelScope.launch(Dispatchers.IO) {
+            val checkedAddresses = _uiState.value.peers.map { it.address }.toSet()
             val dbHosts = database.hostDao().getAllHostsList()
+                .filter { it.hostString in checkedAddresses }
             val groups = buildGroupedHosts(dbHosts)
 
             // Обновляем результаты в группах
@@ -1616,10 +2093,21 @@ class ChecksViewModel(
                 (targetAddr != null && extractHostFromTarget(r.target) == targetAddr)
             }
             if (result != null) {
+                // Ищем peer для active probing данных
+                val matchingPeer = _uiState.value.peers.find { peer ->
+                    val peerHost = extractHostFromAddress(peer.address)
+                    peerHost == addr.address || peerHost == targetAddr
+                }
                 addr.copy(
                     pingResult = result.pingTime,
+                    pingTtl = result.pingTtl,
                     port80Result = result.port80,
-                    port443Result = result.port443
+                    port443Result = result.port443,
+                    port80Blocked = matchingPeer?.port80Blocked ?: false,
+                    port443Blocked = matchingPeer?.port443Blocked ?: false,
+                    httpStatusCode = matchingPeer?.httpStatusCode ?: -1,
+                    httpsStatusCode = matchingPeer?.httpsStatusCode ?: -1,
+                    activeWarning = matchingPeer?.activeWarning ?: ""
                 )
             } else addr
         }

@@ -21,8 +21,14 @@ data class HostAddress(
     val type: AddressType,           // HST, IP0, IP1, IP2, IP3, IP4, IP5
     val dnsSource: String? = null,   // DNS сервер, с которого получен IP ("yandex", "cloudflare", "google", "system", или custom IP)
     val pingResult: Long = -1,       // -1 = off, -2 = X, >=0 = ms
+    val pingTtl: Int = -1,           // TTL из ping (-1 = не получен)
     val port80Result: Long = -1,
-    val port443Result: Long = -1
+    val port443Result: Long = -1,
+    val activeWarning: String = "",  // "blocked", "cert_mismatch", ""
+    val port80Blocked: Boolean = false,   // HTTP fingerprint обнаружил блокировку
+    val port443Blocked: Boolean = false,  // Cert mismatch обнаружен
+    val httpStatusCode: Int = -1,         // HTTP status code порт 80
+    val httpsStatusCode: Int = -1         // HTTP status code порт 443
 ) {
     val isAlive: Boolean
         get() = pingResult >= 0 || port80Result >= 0 || port443Result >= 0
@@ -36,7 +42,8 @@ data class EndpointCheckResult(
     val address: String,             // реальный адрес
     val yggRttMs: Long = -1,
     val portDefaultMs: Long = -1,
-    val fullUrl: String              // URL с подставленным IP для копирования
+    val fullUrl: String,             // URL с подставленным IP для копирования
+    val activeWarning: String = ""   // "blocked", "cert_mismatch", ""
 ) {
     val isAlive: Boolean
         get() = yggRttMs >= 0 || portDefaultMs >= 0

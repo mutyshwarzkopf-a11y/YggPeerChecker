@@ -7,11 +7,17 @@ import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.lazy.LazyRow
@@ -37,6 +43,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
@@ -49,11 +56,13 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Divider
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -77,6 +86,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -86,10 +96,13 @@ import com.example.yggpeerchecker.data.DiscoveredPeer
 import com.example.yggpeerchecker.data.GroupedHost
 import com.example.yggpeerchecker.data.SessionManager
 import com.example.yggpeerchecker.ui.theme.OnlineGreen
+import com.example.yggpeerchecker.ui.theme.OfflineRed
+import com.example.yggpeerchecker.ui.theme.WarningOrange
+import com.example.yggpeerchecker.ui.theme.WarningYellow
 import com.example.yggpeerchecker.utils.PersistentLogger
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ChecksScreen(
     modifier: Modifier = Modifier,
@@ -103,9 +116,13 @@ fun ChecksScreen(
 
     val uiState by viewModel.uiState.collectAsState()
     var showSettingsDialog by remember { mutableStateOf(false) }
-    var showSortDialog by remember { mutableStateOf(false) }
+    var showProbingMenu by remember { mutableStateOf(false) }
     var showSessionsDialog by remember { mutableStateOf(false) }
     var useGroupedView by remember { mutableStateOf(false) }  // Переключатель вида: группы/плоский список
+    var showClearMenu by remember { mutableStateOf(false) }
+    // Детальный диалог для пира
+    var detailPeer by remember { mutableStateOf<DiscoveredPeer?>(null) }
+    var detailFallbacks by remember { mutableStateOf<List<HostCheckResult>>(emptyList()) }
     val scope = rememberCoroutineScope()
 
     // File picker для импорта сессий
@@ -141,8 +158,8 @@ fun ChecksScreen(
         sessionFileToSave = null
     }
 
-    // Обновляем группы когда поиск завершён или переключаемся в grouped view
-    LaunchedEffect(uiState.isSearching, useGroupedView) {
+    // Обновляем группы когда поиск завершён, переключаемся в grouped view, или меняется сортировка
+    LaunchedEffect(uiState.isSearching, useGroupedView, uiState.sortType) {
         if (!uiState.isSearching && uiState.peers.isNotEmpty() && useGroupedView) {
             viewModel.updateGroupsWithResults()
         }
@@ -374,12 +391,84 @@ fun ChecksScreen(
                 Icon(Icons.Default.Settings, contentDescription = "Check Settings", modifier = Modifier.size(24.dp))
             }
 
-            // Sort/Filter icon
-            IconButton(
-                onClick = { showSortDialog = true },
-                modifier = Modifier.size(50.dp)
-            ) {
-                Icon(Icons.Default.FilterList, contentDescription = "Sort/Filter", modifier = Modifier.size(24.dp))
+            // Active Probing icon
+            Box {
+                IconButton(
+                    onClick = {
+                        if (uiState.isActiveProbing) {
+                            viewModel.stopActiveProbing()
+                        } else {
+                            showProbingMenu = true
+                        }
+                    },
+                    modifier = Modifier.size(50.dp)
+                ) {
+                    Icon(
+                        imageVector = if (uiState.isActiveProbing) Icons.Default.Close else Icons.Default.Sensors,
+                        contentDescription = "Active Probing",
+                        modifier = Modifier.size(24.dp),
+                        tint = if (uiState.isActiveProbing)
+                            MaterialTheme.colorScheme.error
+                        else
+                            MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                // Active Probing DropdownMenu
+                DropdownMenu(
+                    expanded = showProbingMenu,
+                    onDismissRequest = { showProbingMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Traceroute (alive)") },
+                        onClick = {
+                            showProbingMenu = false
+                            viewModel.startActiveProbing("tracert")
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("HTTP Fingerprint") },
+                        onClick = {
+                            showProbingMenu = false
+                            viewModel.startActiveProbing("http_fingerprint")
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Certificate Check") },
+                        onClick = {
+                            showProbingMenu = false
+                            viewModel.startActiveProbing("cert_check")
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("HTTP Status Codes") },
+                        onClick = {
+                            showProbingMenu = false
+                            viewModel.startActiveProbing("http_status")
+                        }
+                    )
+                    Divider()
+                    DropdownMenuItem(
+                        text = { Text("Comparative Timing") },
+                        onClick = {
+                            showProbingMenu = false
+                            viewModel.startActiveProbing("comparative_timing")
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Redirect Chain") },
+                        onClick = {
+                            showProbingMenu = false
+                            viewModel.startActiveProbing("redirect_chain")
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Response Size") },
+                        onClick = {
+                            showProbingMenu = false
+                            viewModel.startActiveProbing("response_size")
+                        }
+                    )
+                }
             }
 
             // Sessions icon
@@ -398,7 +487,11 @@ fun ChecksScreen(
                 Icon(
                     imageVector = if (useGroupedView) Icons.Default.ViewList else Icons.Default.ViewModule,
                     contentDescription = if (useGroupedView) "Flat view" else "Grouped view",
-                    modifier = Modifier.size(24.dp)
+                    modifier = Modifier.size(24.dp),
+                    tint = if (useGroupedView)
+                        MaterialTheme.colorScheme.primary
+                    else
+                        MaterialTheme.colorScheme.onSurface
                 )
             }
         }
@@ -407,7 +500,7 @@ fun ChecksScreen(
         OutlinedTextField(
             value = uiState.searchQuery,
             onValueChange = { viewModel.setSearchQuery(it) },
-            placeholder = { Text("Filter: host, IP, protocol, source...", fontSize = 12.sp) },
+            placeholder = { Text("Filter: host, IP, protocol...", fontSize = 12.sp) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             textStyle = MaterialTheme.typography.bodyMedium,
@@ -415,12 +508,12 @@ fun ChecksScreen(
                 if (uiState.searchQuery.isNotEmpty()) {
                     IconButton(
                         onClick = { viewModel.setSearchQuery("") },
-                        modifier = Modifier.size(32.dp)
+                        modifier = Modifier.size(28.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Clear",
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
@@ -437,35 +530,42 @@ fun ChecksScreen(
         )
 
         // Settings Dialog
+        // Merged Settings Dialog (Check Settings + Sort/Filter)
         if (showSettingsDialog) {
+            var tempFilterMs by remember { mutableIntStateOf(uiState.filterMs) }
+            var sortDropdownExpanded by remember { mutableStateOf(false) }
+
             AlertDialog(
                 onDismissRequest = { showSettingsDialog = false },
-                title = { Text("Check Settings") },
+                title = { Text("Settings") },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        // Чекбоксы для типов проверок
                         Text("Check types:", style = MaterialTheme.typography.labelMedium)
-                        CheckType.entries.forEach { checkType ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                // PING всегда активен - отображаем с пометкой
-                                Text(
-                                    text = checkType.displayName,
-                                    color = if (checkType == CheckType.PING)
-                                        MaterialTheme.colorScheme.primary
-                                    else
-                                        MaterialTheme.colorScheme.onSurface
-                                )
-                                Checkbox(
-                                    checked = uiState.enabledCheckTypes.contains(checkType),
-                                    onCheckedChange = { viewModel.toggleCheckType(checkType) },
-                                    enabled = true
-                                )
+                        Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                            CheckType.entries.forEach { checkType ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { viewModel.toggleCheckType(checkType) }
+                                        .padding(vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(
+                                        checked = uiState.enabledCheckTypes.contains(checkType),
+                                        onCheckedChange = { viewModel.toggleCheckType(checkType) },
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(checkType.displayName, fontSize = 13.sp)
+                                }
                             }
                         }
 
+                        // Quick Mode toggle
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -474,7 +574,7 @@ fun ChecksScreen(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text("Quick Mode", style = MaterialTheme.typography.labelMedium)
                                 Text(
-                                    "Stop on first success, check only first DNS IP",
+                                    "First success stops, only first DNS IP",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -485,43 +585,15 @@ fun ChecksScreen(
                             )
                         }
 
-                        // Tracert кнопка
-                        Button(
-                            onClick = { viewModel.runTracert() },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !uiState.isSearching
-                        ) {
-                            Text(
-                                if (uiState.isTracertRunning) "Stop Tracert (${uiState.tracertProgress})"
-                                else "Run Tracert (alive hosts)"
-                            )
-                        }
-                    }
-                },
-                confirmButton = {
-                    Button(onClick = { showSettingsDialog = false }) {
-                        Text("OK")
-                    }
-                }
-            )
-        }
+                        Divider()
 
-        // Sort/Filter Dialog
-        if (showSortDialog) {
-            var tempFilterMs by remember { mutableIntStateOf(uiState.filterMs) }
-            var sortDropdownExpanded by remember { mutableStateOf(false) }
-
-            AlertDialog(
-                onDismissRequest = { showSortDialog = false },
-                title = { Text("Sort & Filter") },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        // Sort by - Dropdown меню
+                        // Sort by - Dropdown
                         Text("Sort by:", style = MaterialTheme.typography.labelMedium)
                         Box {
                             OutlinedButton(
                                 onClick = { sortDropdownExpanded = true },
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier.fillMaxWidth(),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                             ) {
                                 Text(uiState.sortType.displayName, modifier = Modifier.weight(1f))
                                 Icon(Icons.Default.ArrowDropDown, contentDescription = null)
@@ -545,45 +617,20 @@ fun ChecksScreen(
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(4.dp))
-
                         // Filter by ms - Slider
                         Text(
-                            text = "Filter by ms: ${if (tempFilterMs == 0) "off" else "${tempFilterMs}ms"}",
+                            text = "Max ms: ${if (tempFilterMs == 0) "off" else "${tempFilterMs}ms"}",
                             style = MaterialTheme.typography.labelMedium
                         )
                         Slider(
                             value = tempFilterMs.toFloat(),
                             onValueChange = { tempFilterMs = it.toInt() },
                             valueRange = 0f..1000f,
-                            steps = 19,  // 50ms шаг (0, 50, 100, ... 1000)
+                            steps = 19,
                             modifier = Modifier.fillMaxWidth()
                         )
-                        // Быстрые кнопки
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            listOf(0 to "Off", 100 to "100", 300 to "300", 500 to "500", 1000 to "1s").forEach { (ms, label) ->
-                                OutlinedButton(
-                                    onClick = { tempFilterMs = ms },
-                                    contentPadding = PaddingValues(horizontal = 8.dp),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(32.dp),
-                                    colors = if (tempFilterMs == ms)
-                                        ButtonDefaults.outlinedButtonColors(
-                                            containerColor = MaterialTheme.colorScheme.primaryContainer
-                                        )
-                                    else ButtonDefaults.outlinedButtonColors()
-                                ) {
-                                    Text(label, fontSize = 10.sp)
-                                }
-                            }
-                        }
-
                         Text(
-                            "Shows peers with ${uiState.sortType.displayName} ≤ filter value",
+                            "Shows peers with ${uiState.sortType.displayName} ≤ ${if (tempFilterMs == 0) "any" else "${tempFilterMs}ms"}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -592,16 +639,25 @@ fun ChecksScreen(
                 confirmButton = {
                     Button(onClick = {
                         viewModel.setFilterMs(tempFilterMs)
-                        showSortDialog = false
+                        showSettingsDialog = false
                     }) {
                         Text("Apply")
                     }
                 },
                 dismissButton = {
-                    OutlinedButton(onClick = { showSortDialog = false }) {
+                    OutlinedButton(onClick = { showSettingsDialog = false }) {
                         Text("Cancel")
                     }
                 }
+            )
+        }
+
+        // Peer Detail Dialog
+        detailPeer?.let { peer ->
+            PeerDetailDialog(
+                peer = peer,
+                fallbackResults = detailFallbacks,
+                onDismiss = { detailPeer = null }
             )
         }
 
@@ -833,7 +889,11 @@ fun ChecksScreen(
                         isSelected = uiState.selectedPeers.contains(peer.address),
                         onToggleSelection = { viewModel.togglePeerSelection(peer.address) },
                         selectedFallbacks = uiState.selectedFallbacks,
-                        onToggleFallbackSelection = { viewModel.toggleFallbackSelection(it) }
+                        onToggleFallbackSelection = { viewModel.toggleFallbackSelection(it) },
+                        onShowDetail = {
+                            detailPeer = peer
+                            detailFallbacks = fallbackResults
+                        }
                     )
                 }
             }
@@ -847,27 +907,46 @@ fun ChecksScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                IconButton(
-                    onClick = {
-                        val isAllFilters = uiState.typeFilter == "All" && uiState.sourceFilter == "All" && uiState.filterMs <= 0
-                        if (isAllFilters) {
-                            // Фильтр All-All: очищаем всё
-                            viewModel.clearPeersList()
-                            viewModel.clearEndpointSelection()
-                        } else {
-                            // Фильтр активен: очищаем только видимые
-                            if (useGroupedView) {
-                                val visibleKeys = filteredGroupedHosts.map { it.groupKey }.toSet()
-                                viewModel.clearVisibleHosts(visibleKeys, emptySet(), isGroupedMode = true)
-                            } else {
-                                val visibleAddrs = filteredPeers.map { it.address }.toSet()
-                                viewModel.clearVisibleHosts(emptySet(), visibleAddrs, isGroupedMode = false)
+                Box {
+                    IconButton(
+                        onClick = { showClearMenu = true },
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(Icons.Default.Delete, contentDescription = "Clear")
+                    }
+                    DropdownMenu(
+                        expanded = showClearMenu,
+                        onDismissRequest = { showClearMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Clear All") },
+                            onClick = {
+                                showClearMenu = false
+                                viewModel.clearPeersList()
+                                viewModel.clearEndpointSelection()
                             }
-                        }
-                    },
-                    modifier = Modifier.size(40.dp)
-                ) {
-                    Icon(Icons.Default.Delete, contentDescription = "Clear")
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Clear Filtered (visible)") },
+                            onClick = {
+                                showClearMenu = false
+                                if (useGroupedView) {
+                                    val visibleKeys = filteredGroupedHosts.map { it.groupKey }.toSet()
+                                    viewModel.clearVisibleHosts(visibleKeys, emptySet(), isGroupedMode = true)
+                                } else {
+                                    val visibleAddrs = filteredPeers.map { it.address }.toSet()
+                                    viewModel.clearVisibleHosts(emptySet(), visibleAddrs, isGroupedMode = false)
+                                }
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Clear Active Probing") },
+                            onClick = {
+                                showClearMenu = false
+                                viewModel.clearActiveProbingResults()
+                            }
+                        )
+                    }
                 }
 
                 if (useGroupedView) {
@@ -1000,21 +1079,25 @@ private fun SourceFilterChip(
     val backgroundColor = if (isSelected)
         MaterialTheme.colorScheme.primary
     else
-        MaterialTheme.colorScheme.surfaceVariant
+        MaterialTheme.colorScheme.surface
     val textColor = if (isSelected)
         MaterialTheme.colorScheme.onPrimary
     else
-        MaterialTheme.colorScheme.onSurfaceVariant
+        MaterialTheme.colorScheme.onSurface
+    val borderColor = if (isSelected)
+        MaterialTheme.colorScheme.primary
+    else
+        MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
 
     Card(
         modifier = Modifier.clickable { onClick() },
         colors = CardDefaults.cardColors(containerColor = backgroundColor),
-        border = if (isSelected) {
-            androidx.compose.foundation.BorderStroke(
-                1.5.dp,
-                MaterialTheme.colorScheme.primary
-            )
-        } else null
+        border = androidx.compose.foundation.BorderStroke(
+            if (isSelected) 2.dp else 1.dp,
+            borderColor
+        ),
+        elevation = if (isSelected) CardDefaults.cardElevation(defaultElevation = 3.dp)
+            else CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
@@ -1030,7 +1113,7 @@ private fun SourceFilterChip(
             Text(
                 text = "($count)",
                 style = MaterialTheme.typography.labelSmall,
-                color = textColor.copy(alpha = if (isSelected) 0.85f else 0.6f),
+                color = textColor.copy(alpha = if (isSelected) 0.9f else 0.6f),
                 fontSize = 10.sp
             )
         }
@@ -1045,12 +1128,14 @@ fun PeerListItem(
     onToggleSelection: () -> Unit,
     selectedFallbacks: Set<String> = emptySet(),
     onToggleFallbackSelection: (String) -> Unit = {},
+    onShowDetail: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
+            .padding(vertical = 4.dp)
+            .clickable { onShowDetail() },
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
         )
@@ -1068,6 +1153,7 @@ fun PeerListItem(
                 geoIp = peer.geoIp,
                 isAlive = peer.isAlive(),
                 pingMs = peer.pingMs,
+                pingTtl = peer.pingTtl,
                 yggRttMs = peer.yggRttMs,
                 portDefaultMs = peer.portDefaultMs,
                 port80Ms = peer.port80Ms,
@@ -1075,7 +1161,12 @@ fun PeerListItem(
                 hops = peer.hops,
                 isSelected = isSelected,
                 onToggleSelection = onToggleSelection,
-                errorReason = if (!peer.isAlive()) peer.getErrorReason() else null
+                errorReason = if (!peer.isAlive()) peer.getErrorReason() else null,
+                activeWarning = peer.activeWarning,
+                httpStatusCode = peer.httpStatusCode,
+                httpsStatusCode = peer.httpsStatusCode,
+                port80Blocked = peer.port80Blocked,
+                port443Blocked = peer.port443Blocked
             )
 
             // === Fallback записи (если есть) ===
@@ -1093,18 +1184,20 @@ fun PeerListItem(
                     
                     PeerEntryRow(
                         address = result.target,
-                        protocol = peer.protocol, // протокол от основного
-                        region = peer.region,     // регион от основного
-                        geoIp = peer.geoIp,       // geoIp от основного
+                        protocol = peer.protocol,
+                        region = peer.region,
+                        geoIp = peer.geoIp,
                         isAlive = fallbackIsAlive,
                         pingMs = result.pingTime,
+                        pingTtl = result.pingTtl,
                         yggRttMs = result.yggRtt,
                         portDefaultMs = result.portDefault,
                         port80Ms = result.port80,
                         port443Ms = result.port443,
                         isSelected = selectedFallbacks.contains(result.target),
                         onToggleSelection = { onToggleFallbackSelection(result.target) },
-                        isFallback = true
+                        isFallback = true,
+                        dnsSource = result.dnsSource
                     )
                 }
             }
@@ -1123,6 +1216,7 @@ private fun PeerEntryRow(
     geoIp: String = "",
     isAlive: Boolean,
     pingMs: Long,
+    pingTtl: Int = -1,
     yggRttMs: Long,
     portDefaultMs: Long,
     port80Ms: Long,
@@ -1131,12 +1225,19 @@ private fun PeerEntryRow(
     isSelected: Boolean,
     onToggleSelection: () -> Unit,
     errorReason: String? = null,
-    isFallback: Boolean = false
+    isFallback: Boolean = false,
+    // Active probing данные
+    activeWarning: String = "",
+    httpStatusCode: Int = -1,
+    httpsStatusCode: Int = -1,
+    port80Blocked: Boolean = false,
+    port443Blocked: Boolean = false,
+    // DNS source для flat mode
+    dnsSource: String? = null
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onToggleSelection() }
             .padding(start = if (isFallback) 16.dp else 0.dp) // отступ для fallback
     ) {
         // Первая строка: checkbox + адрес
@@ -1159,13 +1260,46 @@ private fun PeerEntryRow(
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.weight(1f)
             )
-            
-            // Индикатор живости
+
+            // DNS source иконка (для fallback записей в flat mode)
+            if (isFallback && dnsSource != null) {
+                FlatDnsSourceIndicator(dnsSource)
+            }
+
+            // Определяем подозрительные условия
+            val isSuspicious = hops in 1..4 ||
+                (pingMs in 1..9 && pingMs >= 0) ||
+                (port443Ms == -2L && port80Ms >= 0) ||  // 443 failed но 80 OK
+                activeWarning.isNotEmpty()
+
+            // Индикатор статуса
+            val statusText = when {
+                !isAlive -> "x"
+                isSuspicious -> "\u26A0"  // ⚠
+                else -> "+"
+            }
+            val statusColor = when {
+                !isAlive -> Color.Red
+                isSuspicious -> WarningYellow
+                else -> OnlineGreen
+            }
+
             Text(
-                text = if (isAlive) "*" else "x",
-                color = if (isAlive) OnlineGreen else Color.Red,
-                fontSize = 18.sp,
-                modifier = Modifier.padding(start = 8.dp)
+                text = statusText,
+                color = statusColor,
+                fontSize = if (statusText == "+") 16.sp else 18.sp,
+                fontWeight = if (statusText == "+") FontWeight.Bold else null,
+                modifier = Modifier
+                    .padding(start = 8.dp)
+                    .then(
+                        if (statusText == "+") Modifier
+                            .background(
+                                OnlineGreen.copy(alpha = 0.15f),
+                                shape = RoundedCornerShape(4.dp)
+                            )
+                            .padding(horizontal = 4.dp)
+                        else Modifier
+                    )
             )
         }
         
@@ -1204,18 +1338,76 @@ private fun PeerEntryRow(
                 .padding(start = 36.dp, top = 2.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            CheckResultChip("Ping", pingMs)
+            CheckResultChip("Ping", pingMs, ttl = pingTtl)
             CheckResultChip("YRtt", yggRttMs)
             CheckResultChip("Pdef", portDefaultMs)
-            CheckResultChip("P80", port80Ms)
-            CheckResultChip("P443", port443Ms)
-            // Hops (если есть)
-            if (hops > 0) {
+            CheckResultChip("P80", port80Ms, isBlocked = port80Blocked)
+            CheckResultChip("P443", port443Ms, isBlocked = port443Blocked)
+        }
+
+        // Hops на отдельной строке (если есть)
+        if (hops > 0) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 36.dp, top = 1.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                val hopsSuspicious = hops in 1..4
                 Text(
-                    text = "Hops:$hops",
+                    text = if (hopsSuspicious) "Hops: $hops \u26A0" else "Hops: $hops",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.tertiary
+                    color = if (hopsSuspicious) WarningOrange else MaterialTheme.colorScheme.tertiary,
+                    fontSize = 9.sp
                 )
+            }
+        }
+
+        // Active probing результаты (если есть)
+        val hasActiveResults = httpStatusCode > 0 || httpsStatusCode > 0 || activeWarning.isNotEmpty() ||
+            port80Blocked || port443Blocked
+        if (hasActiveResults) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 36.dp, top = 1.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (httpStatusCode > 0) {
+                    StatusCodeChip("HTTP", httpStatusCode, port80Blocked)
+                }
+                if (httpsStatusCode > 0) {
+                    StatusCodeChip("HTTPS", httpsStatusCode, port443Blocked)
+                }
+                if (port80Blocked && httpStatusCode <= 0) {
+                    Text(
+                        text = "P80:\u26A0",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WarningOrange,
+                        fontSize = 9.sp
+                    )
+                }
+                if (port443Blocked && httpsStatusCode <= 0) {
+                    Text(
+                        text = "P443:\u26A0",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WarningOrange,
+                        fontSize = 9.sp
+                    )
+                }
+                if (activeWarning.isNotEmpty()) {
+                    Text(
+                        text = when (activeWarning) {
+                            "blocked" -> "Stub:\u26A0"
+                            "cert_mismatch" -> "Cert:\u26A0"
+                            "anomaly" -> "DPI:\u26A0"
+                            else -> activeWarning
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WarningYellow,
+                        fontSize = 9.sp
+                    )
+                }
             }
         }
         
@@ -1232,14 +1424,20 @@ private fun PeerEntryRow(
 }
 
 @Composable
-private fun CheckResultChip(label: String, value: Long) {
-    // value: -1 = off (не проверялся), -2 = X (ошибка), >=0 = время в ms
+private fun CheckResultChip(
+    label: String,
+    value: Long,
+    ttl: Int = -1,
+    isBlocked: Boolean = false
+) {
     val color = when {
+        isBlocked && value >= 0 -> WarningOrange
         value >= 0 -> OnlineGreen
         value == -2L -> Color.Red
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     val text = when {
+        value >= 0 && ttl > 0 -> "$label:$value($ttl)"
         value >= 0 -> "$label:$value"
         value == -2L -> "$label:X"
         else -> "$label:off"
@@ -1250,6 +1448,309 @@ private fun CheckResultChip(label: String, value: Long) {
         color = color,
         fontSize = 9.sp
     )
+}
+
+/**
+ * Цветной чип HTTP status code
+ * 2xx = зелёный, 3xx = оранжевый, 4xx-5xx = красный
+ */
+@Composable
+private fun StatusCodeChip(label: String, code: Int, isBlocked: Boolean = false) {
+    val color = when {
+        isBlocked -> WarningOrange
+        code in 200..299 -> OnlineGreen
+        code in 300..399 -> WarningOrange
+        code in 400..599 -> Color.Red
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Text(
+        text = "$label:$code",
+        style = MaterialTheme.typography.labelSmall,
+        color = color,
+        fontSize = 9.sp
+    )
+}
+
+/**
+ * DNS source иконка для flat mode (рядом с адресом fallback)
+ */
+@Composable
+private fun FlatDnsSourceIndicator(source: String) {
+    Spacer(modifier = Modifier.width(2.dp))
+    Text(
+        text = when (source.lowercase()) {
+            "yandex" -> "Ya"
+            "cloudflare" -> "CF"
+            "google" -> "Go"
+            "system" -> "Sys"
+            else -> source.take(3)
+        },
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.tertiary,
+        fontSize = 8.sp,
+        modifier = Modifier.padding(start = 2.dp)
+    )
+}
+
+/**
+ * Диалог детальной информации о пире
+ */
+@Composable
+fun PeerDetailDialog(
+    peer: DiscoveredPeer,
+    fallbackResults: List<HostCheckResult>,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = peer.address,
+                style = MaterialTheme.typography.titleSmall,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 2
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                // Базовая инфо
+                DetailRow("Protocol", peer.protocol)
+                DetailRow("Region", peer.region)
+                if (peer.geoIp.isNotEmpty()) DetailRow("GeoIP", peer.geoIp)
+                DetailRow("Source", peer.sourceShort)
+                DetailRow("Status", if (peer.isAlive()) "Alive" else "Dead")
+
+                Divider(modifier = Modifier.padding(vertical = 4.dp))
+
+                // Результаты проверок
+                Text("Check Results", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                DetailResultRow("Ping", peer.pingMs, peer.pingTtl)
+                DetailResultRow("Ygg RTT", peer.yggRttMs)
+                DetailResultRow("Port (default)", peer.portDefaultMs)
+                DetailResultRow("Port 80", peer.port80Ms, isBlocked = peer.port80Blocked)
+                DetailResultRow("Port 443", peer.port443Ms, isBlocked = peer.port443Blocked)
+
+                if (peer.hops > 0) DetailRow("Hops", "${peer.hops}")
+
+                // Active Probing
+                if (peer.httpStatusCode > 0 || peer.httpsStatusCode > 0 ||
+                    peer.httpFingerprint.isNotEmpty() || peer.certFingerprint.isNotEmpty() ||
+                    peer.redirectChain.isNotEmpty() || peer.responseSize >= 0 ||
+                    peer.comparativeTimingRatio >= 0) {
+
+                    Divider(modifier = Modifier.padding(vertical = 4.dp))
+                    Text("Active Probing", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+
+                    if (peer.httpStatusCode > 0) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("HTTP: ", style = MaterialTheme.typography.bodySmall)
+                            StatusCodeChip("", peer.httpStatusCode, peer.port80Blocked)
+                            Text(
+                                text = " ${httpStatusDescription(peer.httpStatusCode)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 9.sp
+                            )
+                        }
+                    }
+                    if (peer.httpsStatusCode > 0) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("HTTPS: ", style = MaterialTheme.typography.bodySmall)
+                            StatusCodeChip("", peer.httpsStatusCode, peer.port443Blocked)
+                            Text(
+                                text = " ${httpStatusDescription(peer.httpsStatusCode)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 9.sp
+                            )
+                        }
+                    }
+                    if (peer.httpFingerprint.isNotEmpty()) {
+                        DetailRow("HTTP Fingerprint", peer.httpFingerprint)
+                    }
+                    if (peer.certFingerprint.isNotEmpty()) {
+                        DetailRow("Certificate", peer.certFingerprint)
+                    }
+                    if (peer.redirectChain.isNotEmpty()) {
+                        DetailRow("Redirect Chain", peer.redirectChain)
+                    }
+                    if (peer.redirectUrl.isNotEmpty()) {
+                        DetailRow("Redirect To", peer.redirectUrl)
+                    }
+                    if (peer.responseSize >= 0) {
+                        DetailRow("Response Size", "${peer.responseSize}B")
+                    }
+                    if (peer.comparativeTimingRatio >= 0) {
+                        val ratioStr = String.format("%.1fx", peer.comparativeTimingRatio)
+                        val color = if (peer.comparativeTimingRatio > 10) WarningOrange else OnlineGreen
+                        Row {
+                            Text("Timing Ratio: ", style = MaterialTheme.typography.bodySmall)
+                            Text(ratioStr, style = MaterialTheme.typography.bodySmall, color = color)
+                        }
+                    }
+                    if (peer.activeWarning.isNotEmpty()) {
+                        DetailRow("Warning", peer.activeWarning)
+                    }
+                }
+
+                // Fallback результаты
+                if (fallbackResults.isNotEmpty()) {
+                    Divider(modifier = Modifier.padding(vertical = 4.dp))
+                    Text("Fallback IPs (${fallbackResults.size})", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    fallbackResults.forEach { fb ->
+                        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = fb.target.take(30),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    if (fb.dnsSource != null) {
+                                        Text(
+                                            text = " (${fb.dnsSource})",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.tertiary,
+                                            fontSize = 8.sp
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = if (fb.available) "\u25CF" else "x",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (fb.available) OnlineGreen else Color.Red,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                            }
+                            // Подробные результаты проверок для каждого IP
+                            Row(
+                                modifier = Modifier.padding(start = 8.dp, top = 1.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (fb.pingTime != -1L) {
+                                    Text(
+                                        text = if (fb.pingTime >= 0) "Ping:${fb.pingTime}" else "Ping:X",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (fb.pingTime >= 0) OnlineGreen else Color.Red,
+                                        fontSize = 9.sp
+                                    )
+                                }
+                                if (fb.port80 != -1L) {
+                                    Text(
+                                        text = if (fb.port80 >= 0) "P80:${fb.port80}" else "P80:X",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (fb.port80 >= 0) OnlineGreen else Color.Red,
+                                        fontSize = 9.sp
+                                    )
+                                }
+                                if (fb.port443 != -1L) {
+                                    Text(
+                                        text = if (fb.port443 >= 0) "P443:${fb.port443}" else "P443:X",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (fb.port443 >= 0) OnlineGreen else Color.Red,
+                                        fontSize = 9.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    )
+}
+
+@Composable
+private fun DetailRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = "$label:",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(0.4f)
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(0.6f)
+        )
+    }
+}
+
+@Composable
+private fun DetailResultRow(label: String, value: Long, ttl: Int = -1, isBlocked: Boolean = false) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = "$label:",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(0.4f)
+        )
+        val displayText = when {
+            value >= 0 && ttl > 0 -> "${value}ms (TTL:$ttl)"
+            value >= 0 -> "${value}ms"
+            value == -2L -> "Failed"
+            else -> "off"
+        }
+        val color = when {
+            isBlocked && value >= 0 -> WarningOrange
+            value >= 0 -> OnlineGreen
+            value == -2L -> Color.Red
+            else -> MaterialTheme.colorScheme.onSurfaceVariant
+        }
+        Text(
+            text = displayText,
+            style = MaterialTheme.typography.bodySmall,
+            color = color,
+            modifier = Modifier.weight(0.6f)
+        )
+    }
+}
+
+/**
+ * Краткое описание HTTP статус-кода
+ */
+private fun httpStatusDescription(code: Int): String = when (code) {
+    200 -> "OK"
+    301 -> "Moved"
+    302 -> "Redirect"
+    303 -> "See Other"
+    307 -> "Temp Redirect"
+    308 -> "Perm Redirect"
+    400 -> "Bad Request"
+    403 -> "Forbidden"
+    404 -> "Not Found"
+    451 -> "Censored"
+    500 -> "Server Error"
+    502 -> "Bad Gateway"
+    503 -> "Unavailable"
+    else -> when (code / 100) {
+        2 -> "Success"
+        3 -> "Redirect"
+        4 -> "Client Err"
+        5 -> "Server Err"
+        else -> ""
+    }
 }
 
 

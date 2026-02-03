@@ -121,6 +121,11 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
         mutableFloatStateOf(prefs.getInt("ping_count", 1).toFloat())
     }
 
+    // Network timeout (1-15 секунд)
+    var networkTimeout by remember {
+        mutableFloatStateOf(prefs.getInt("network_timeout_ms", 5000).toFloat() / 1000f)
+    }
+
     // DNS Settings — дефолт system, влияет только на Checks
     var selectedDns by remember {
         mutableStateOf(prefs.getString("dns_server", DnsServers.SYSTEM) ?: DnsServers.SYSTEM)
@@ -165,12 +170,12 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
                         concurrentStreams = newValue
                         prefs.edit().putInt("concurrent_streams", newValue.roundToInt()).apply()
                     },
-                    valueRange = 1f..20f,
-                    steps = 18,
+                    valueRange = 1f..30f,
+                    steps = 28,
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = "Controls parallel network checks (1-20)",
+                    text = "Controls parallel network checks (1-30)",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -258,6 +263,37 @@ fun ConfigTab(modifier: Modifier = Modifier, themeManager: ThemeManager) {
                 )
                 Text(
                     text = "Number of ping packets (1-5). Higher = more accurate avg RTT",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Network timeout slider
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Network timeout:")
+                    Text(
+                        text = "${networkTimeout.roundToInt()} sec",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Slider(
+                    value = networkTimeout,
+                    onValueChange = { newValue ->
+                        networkTimeout = newValue
+                        prefs.edit().putInt("network_timeout_ms", (newValue.roundToInt() * 1000)).apply()
+                    },
+                    valueRange = 1f..15f,
+                    steps = 13,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = "Timeout for all network operations (1-15 sec)",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

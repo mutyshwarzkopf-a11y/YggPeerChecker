@@ -26,6 +26,21 @@ data class DiscoveredPeer(
     val port443Ms: Long = -1,
     // Tracert hops (-1 = не проверялось)
     val hops: Int = -1,
+    // TTL из ping (-1 = не получен)
+    val pingTtl: Int = -1,
+    // Active probing результаты
+    val httpStatusCode: Int = -1,      // HTTP status code port 80
+    val httpsStatusCode: Int = -1,     // HTTP status code port 443
+    val httpFingerprint: String = "",   // HTTP fingerprint detail
+    val certFingerprint: String = "",   // Certificate fingerprint detail
+    val activeWarning: String = "",     // "blocked", "cert_mismatch", ""
+    val port80Blocked: Boolean = false,
+    val port443Blocked: Boolean = false,
+    // Расширенные результаты active probing
+    val redirectUrl: String = "",              // Location header при 3xx
+    val responseSize: Int = -1,               // Байт в ответе (-1 = не проверялось)
+    val comparativeTimingRatio: Float = -1f,  // port_ms / ping_ms (-1 = не проверялось)
+    val redirectChain: String = "",           // Цепочка "url1 → url2 → final"
     // Нормализованный ключ для сопоставления (address:port в lowercase)
     val normalizedKey: String = ""
 ) {
@@ -69,6 +84,18 @@ data class DiscoveredPeer(
             put("port80Ms", port80Ms)
             put("port443Ms", port443Ms)
             put("hops", hops)
+            put("pingTtl", pingTtl)
+            put("httpStatusCode", httpStatusCode)
+            put("httpsStatusCode", httpsStatusCode)
+            put("httpFingerprint", httpFingerprint)
+            put("certFingerprint", certFingerprint)
+            put("activeWarning", activeWarning)
+            put("port80Blocked", port80Blocked)
+            put("port443Blocked", port443Blocked)
+            put("redirectUrl", redirectUrl)
+            put("responseSize", responseSize)
+            put("comparativeTimingRatio", comparativeTimingRatio.toDouble())
+            put("redirectChain", redirectChain)
             put("normalizedKey", normalizedKey)
         }
     }
@@ -112,6 +139,18 @@ data class DiscoveredPeer(
                 port80Ms = json.optLong("port80Ms", -1),
                 port443Ms = json.optLong("port443Ms", -1),
                 hops = json.optInt("hops", -1),
+                pingTtl = json.optInt("pingTtl", -1),
+                httpStatusCode = json.optInt("httpStatusCode", -1),
+                httpsStatusCode = json.optInt("httpsStatusCode", -1),
+                httpFingerprint = json.optString("httpFingerprint", ""),
+                certFingerprint = json.optString("certFingerprint", ""),
+                activeWarning = json.optString("activeWarning", ""),
+                port80Blocked = json.optBoolean("port80Blocked", false),
+                port443Blocked = json.optBoolean("port443Blocked", false),
+                redirectUrl = json.optString("redirectUrl", ""),
+                responseSize = json.optInt("responseSize", -1),
+                comparativeTimingRatio = json.optDouble("comparativeTimingRatio", -1.0).toFloat(),
+                redirectChain = json.optString("redirectChain", ""),
                 normalizedKey = json.optString("normalizedKey", "")
             )
         }

@@ -49,10 +49,10 @@ interface HostDao {
     @Query("SELECT COUNT(*) FROM hosts WHERE dnsIp1 IS NOT NULL")
     fun getResolvedHostsCount(): Flow<Int>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(host: Host)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAll(hosts: List<Host>)
 
     @Update

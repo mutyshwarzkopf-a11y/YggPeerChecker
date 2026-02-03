@@ -3,12 +3,20 @@ package com.example.yggpeerchecker.utils
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
+/**
+ * Результат пинга: RTT + TTL
+ */
+data class PingResult(
+    val rttMs: Long = -1,   // RTT в миллисекундах (-1 = не проверялось, -2 = failed)
+    val ttl: Int = -1       // TTL из ответа (-1 = не получен)
+)
+
 object PingUtil {
     /**
-     * Ping a host and return RTT in milliseconds, or -1 if failed.
+     * Ping a host and return PingResult with RTT and TTL.
      * @param count количество пингов (1-5). При count>1 возвращает avg RTT
      */
-    fun ping(host: String, timeoutMs: Int = 3000, count: Int = 1): Long {
+    fun ping(host: String, timeoutMs: Int = 3000, count: Int = 1): PingResult {
         return try {
             val timeoutSec = (timeoutMs / 1000).coerceAtLeast(1)
             val pingCount = count.coerceIn(1, 5)
@@ -19,8 +27,15 @@ object PingUtil {
             val reader = BufferedReader(InputStreamReader(process.inputStream))
             var line: String?
             var rtt: Long = -1
+            var ttl: Int = -1
 
             while (reader.readLine().also { line = it } != null) {
+                // Парсим TTL из строк вида "64 bytes from ...: icmp_seq=1 ttl=64 time=45.2 ms"
+                if (ttl < 0 && line!!.contains("ttl=")) {
+                    val ttlStr = line!!.substringAfter("ttl=").substringBefore(" ")
+                    ttl = ttlStr.toIntOrNull() ?: -1
+                }
+
                 if (pingCount > 1) {
                     // При count>1 парсим avg из строки "rtt min/avg/max/mdev = ..."
                     if (line!!.contains("min/avg/max")) {
@@ -47,9 +62,9 @@ object PingUtil {
             process.waitFor()
             process.destroy()
 
-            rtt
+            PingResult(rtt, ttl)
         } catch (e: Exception) {
-            -1
+            PingResult(-1, -1)
         }
     }
 
@@ -64,7 +79,6 @@ object PingUtil {
      */
     fun canPing(address: String): Boolean {
         val host = extractHost(address) ?: return false
-        // Allow pinging both hostnames and IP addresses
         return true
     }
 }

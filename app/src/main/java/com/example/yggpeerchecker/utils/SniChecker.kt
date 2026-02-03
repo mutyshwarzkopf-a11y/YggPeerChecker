@@ -88,17 +88,17 @@ object SniChecker {
             null
         }
 
-        val available = pingResult >= 0 || portResult?.available == true
+        val available = pingResult.rttMs >= 0 || portResult?.available == true
         val responseTime = when {
             portResult?.available == true -> portResult.responseTime
-            pingResult >= 0 -> pingResult.toLong()
+            pingResult.rttMs >= 0 -> pingResult.rttMs
             else -> System.currentTimeMillis() - startTime
         }
 
         CheckResult(
             available = available,
             responseTime = responseTime,
-            pingTime = if (pingResult >= 0) pingResult.toLong() else null,
+            pingTime = if (pingResult.rttMs >= 0) pingResult.rttMs else null,
             portTime = portResult?.portTime,
             error = if (!available) portResult?.error ?: "Host unreachable" else null
         )

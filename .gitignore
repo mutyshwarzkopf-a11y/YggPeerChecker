@@ -13,7 +13,7 @@ local.properties
 
 # Personal/Internal docs (не для публикации)
 mike.md
-schema.md
+schem*.md
 plan*.md
 yggpeers_complete*.md
 qwen*

@@ -36,6 +36,8 @@ import com.example.yggpeerchecker.data.GroupedHost
 import com.example.yggpeerchecker.data.HostAddress
 import com.example.yggpeerchecker.data.HostEndpoint
 import com.example.yggpeerchecker.ui.theme.OnlineGreen
+import com.example.yggpeerchecker.ui.theme.WarningOrange
+import com.example.yggpeerchecker.ui.theme.WarningYellow
 
 /**
  * Карточка сгруппированного хоста
@@ -251,14 +253,31 @@ private fun AddressRow(addr: HostAddress) {
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            CheckChip("Ping", addr.pingResult)
-            CheckChip("P80", addr.port80Result)
-            CheckChip("P443", addr.port443Result)
+            CheckChip("Ping", addr.pingResult, ttl = addr.pingTtl)
+            CheckChip("P80", addr.port80Result, isBlocked = addr.port80Blocked)
+            CheckChip("P443", addr.port443Result, isBlocked = addr.port443Blocked)
 
-            // Индикатор живости
+            // Определяем подозрительные условия
+            val isSuspicious = addr.port80Blocked || addr.port443Blocked ||
+                addr.activeWarning.isNotEmpty() ||
+                (addr.pingResult in 1..9) ||
+                (addr.pingTtl in 1..4 && addr.pingTtl > 0) ||
+                (addr.port443Result == -2L && addr.port80Result >= 0)
+
+            // Индикатор статуса: + для OK, ⚠ для подозрительных, x для мёртвых
+            val statusText = when {
+                !addr.isAlive -> "x"
+                isSuspicious -> "⚠"
+                else -> "+"
+            }
+            val statusColor = when {
+                !addr.isAlive -> Color.Red
+                isSuspicious -> WarningYellow
+                else -> OnlineGreen
+            }
             Text(
-                text = if (addr.isAlive) "*" else "x",
-                color = if (addr.isAlive) OnlineGreen else Color.Red,
+                text = statusText,
+                color = statusColor,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(start = 4.dp)
@@ -336,10 +355,18 @@ private fun EndpointRow(
             CheckChip("YRtt", result.yggRttMs)
             CheckChip("Pdef", result.portDefaultMs)
 
-            // Индикатор живости
+            // Индикатор статуса: ● зелёная точка для OK, ⚠ для подозрительных, x для мёртвых
             Text(
-                text = if (result.isAlive) "*" else "x",
-                color = if (result.isAlive) OnlineGreen else Color.Red,
+                text = when {
+                    result.activeWarning.isNotEmpty() -> "⚠"
+                    result.isAlive -> "●"
+                    else -> "x"
+                },
+                color = when {
+                    result.activeWarning.isNotEmpty() -> WarningYellow
+                    result.isAlive -> OnlineGreen
+                    else -> Color.Red
+                },
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(start = 4.dp)
@@ -352,7 +379,7 @@ private fun EndpointRow(
  * Индикатор DNS сервера-источника рядом с IP адресом
  */
 @Composable
-private fun DnsSourceIndicator(source: String) {
+internal fun DnsSourceIndicator(source: String) {
     when (source.lowercase()) {
         "yandex" -> androidx.compose.foundation.Image(
             painter = painterResource(R.drawable.ic_dns_yandex),
@@ -385,15 +412,19 @@ private fun DnsSourceIndicator(source: String) {
 
 /**
  * Чип с результатом проверки
+ * @param ttl TTL значение (показывается для Ping как "Ping:45(64)")
+ * @param isBlocked порт заблокирован (оранжевый цвет)
  */
 @Composable
-private fun CheckChip(label: String, value: Long) {
+private fun CheckChip(label: String, value: Long, ttl: Int = -1, isBlocked: Boolean = false) {
     val color = when {
+        isBlocked && value >= 0 -> WarningOrange
         value >= 0 -> OnlineGreen
         value == -2L -> Color.Red
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     val text = when {
+        value >= 0 && ttl > 0 -> "$label:$value($ttl)"
         value >= 0 -> "$label:$value"
         value == -2L -> "$label:X"
         else -> "$label:off"
